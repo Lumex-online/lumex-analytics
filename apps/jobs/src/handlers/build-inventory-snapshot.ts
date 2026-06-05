@@ -1,0 +1,16 @@
+import { loadDataset } from "../database/lumex-source.js";
+import { env } from "../config/env.js";
+import { getMongoDb } from "../database/mongo.js";
+import { generateBatchId, persistInventory } from "../persist/mongo/index.js";
+
+export async function runBuildInventorySnapshot(): Promise<void> {
+  if (env.ANALYTICS_STORE !== "mongo") {
+    console.log("[build-inventory-snapshot] skipped because ANALYTICS_STORE is not mongo");
+    return;
+  }
+  const batchId = generateBatchId();
+  console.log(`[build-inventory-snapshot] batchId=${batchId} starting`);
+  const dataset = await loadDataset(true);
+  const count = await persistInventory({ db: await getMongoDb(), dataset, batchId });
+  console.log(`[build-inventory-snapshot] batchId=${batchId} done rows=${count}`);
+}
