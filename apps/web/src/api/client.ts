@@ -18,7 +18,7 @@ import type {
 import { resolveRequestedUserId } from "../lib/embed";
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000/api/v1";
+  import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 
 function parseSourceUserId(value: string | undefined) {
   if (!value || value.trim().length === 0) {
@@ -43,6 +43,15 @@ let activeSourceUserId: string =
   parseSourceUserId(import.meta.env.VITE_SOURCE_USER_ID) ??
   "1";
 
+function buildRequestHeaders(sourceUserId: string, initHeaders?: HeadersInit): Headers {
+  const headers = new Headers(initHeaders);
+  headers.set("Content-Type", "application/json");
+  if (import.meta.env.DEV) {
+    headers.set("x-source-user-id", sourceUserId);
+  }
+  return headers;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const candidateSourceUserIds = urlSourceUserId
     ? [activeSourceUserId]
@@ -54,11 +63,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   for (const sourceUserId of candidateSourceUserIds) {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
-      headers: {
-        "Content-Type": "application/json",
-        "x-source-user-id": sourceUserId,
-        ...init?.headers
-      }
+      headers: buildRequestHeaders(sourceUserId, init?.headers)
     });
 
     if (response.ok) {
@@ -76,8 +81,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function downloadFile(path: string, filename: string) {
+  const headers = new Headers();
+  if (import.meta.env.DEV) {
+    headers.set("x-source-user-id", activeSourceUserId);
+  }
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "x-source-user-id": activeSourceUserId }
+    headers
   });
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status}`);

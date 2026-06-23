@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:setup": "tsx src/scripts/setup-analytics-mongo.ts"
@@ -14,9 +16,9 @@
     "@lumex/analytics-core": "0.1.0",
     "@lumex/lumex-source": "0.1.0",
     "@lumex/shared-types": "0.1.0",
-    "fastify": "^5.2.1",
+    "fastify": "^5.8.5",
     "mongodb": "^6.9.0",
-    "xlsx": "^0.18.5"
+    "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

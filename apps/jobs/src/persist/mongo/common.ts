@@ -17,12 +17,16 @@ export function sourceTableForRow(row: { sourceType: "sales" | "purchase" | "mem
   }
 
   if (row.sourceType === "sales") {
-    return row.productType === "loose_lots"
-      ? "loose_lots_order_master"
-      : "own_shape_order_master";
+    if (row.productType === "loose_lot") {
+      return "loose_lots_order_master";
+    }
+    if (row.productType === "own_shape") {
+      return "own_shape_order_master";
+    }
+    return "order_master";
   }
 
-  return row.productType === "loose_lots"
+  return row.productType === "purchase_loose_lot"
     ? "loose_lots_purchase_master"
     : "warehouse_purchase_master";
 }

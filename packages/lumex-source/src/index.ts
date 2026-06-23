@@ -438,6 +438,9 @@ async function loadRawCollections(): Promise<LumexRawCollections> {
     try {
       return await loadRawCollectionsFromMongo();
     } catch (error) {
+      if (process.env.NODE_ENV === "production") {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       console.warn(
         `[lumex.data] Falling back to local files because the Lumex MongoDB is unavailable: ${message}`
@@ -450,6 +453,9 @@ async function loadRawCollections(): Promise<LumexRawCollections> {
     try {
       return await loadRawCollectionsFromApi();
     } catch (error) {
+      if (process.env.NODE_ENV === "production") {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       console.warn(
         `[lumex.data] Falling back to local files because the Lumex source API is unavailable: ${message}`

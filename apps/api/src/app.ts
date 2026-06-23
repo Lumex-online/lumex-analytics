@@ -1,4 +1,4 @@
-import cors from "@fastify/cors";
+import cors, { type OriginFunction } from "@fastify/cors";
 import Fastify from "fastify";
 import { assertDistinctMongoUsers, closeMongoClient, getMongoDb } from "./database/mongo.js";
 import { AdminAccessController } from "./modules/admin-access/admin-access.controller.js";
@@ -40,11 +40,38 @@ import { registerSkuAnalyticsRoutes } from "./modules/sku-analytics/sku-analytic
 import { SkuAnalyticsController } from "./modules/sku-analytics/sku-analytics.controller.js";
 import { SkuAnalyticsService } from "./modules/sku-analytics/sku-analytics.service.js";
 
+function normalizeOrigin(origin: string): string {
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return origin.replace(/\/+$/, "");
+  }
+}
+
+function buildCorsOriginMatcher(): OriginFunction {
+  const allowedOrigins = new Set(
+    env.WEB_ORIGIN
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+      .map(normalizeOrigin)
+  );
+
+  return (origin, callback) => {
+    if (!origin || allowedOrigins.has(normalizeOrigin(origin))) {
+      callback(null, true);
+      return;
+    }
+
+    callback(null, false);
+  };
+}
+
 export async function buildApp() {
   const app = Fastify({ logger: true });
 
   await app.register(cors, {
-    origin: true,
+    origin: buildCorsOriginMatcher(),
     credentials: true
   });
 

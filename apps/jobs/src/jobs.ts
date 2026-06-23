@@ -1,5 +1,4 @@
 import { runBuildInventorySnapshot } from "./handlers/build-inventory-snapshot.js";
-import { runRefreshAggregates } from "./handlers/refresh-aggregates.js";
 import { runSyncMemoFacts } from "./handlers/sync-memo-facts.js";
 import { runSyncPurchaseFacts } from "./handlers/sync-purchase-facts.js";
 import { runSyncSalesFacts } from "./handlers/sync-sales-facts.js";
@@ -42,11 +41,5 @@ export const jobs: JobDefinition[] = [
     schedule: "30 * * * *",
     description: "Rebuild current inventory snapshot from loose lots and own shape masters.",
     handler: runBuildInventorySnapshot
-  },
-  {
-    key: "refresh-aggregates",
-    schedule: "45 * * * *",
-    description: "Refresh aggregate tables and invalidate cache versions.",
-    handler: runRefreshAggregates
   }
 ];

@@ -9,10 +9,15 @@
   ],
   "scripts": {
     "dev": "concurrently \"npm run dev --workspace @lumex/api\" \"npm run dev --workspace @lumex/web\"",
+    "dev:local": "concurrently \"npm run dev --workspace @lumex/api\" \"npm run dev --workspace @lumex/web\"",
+    "dev:dev": "concurrently \"npm run dev:dev --workspace @lumex/api\" \"npm run dev:dev --workspace @lumex/web\"",
     "dev:api": "npm run dev --workspace @lumex/api",
-    "dev:lumex-backend": "npm run dev --workspace @lumex/lumex-backend",
     "dev:web": "npm run dev --workspace @lumex/web",
     "dev:jobs": "npm run dev --workspace @lumex/jobs",
+    "start:api": "npm run start --workspace @lumex/api",
+    "start:jobs": "npm run start --workspace @lumex/jobs",
+    "setup:db": "npm run db:setup --workspace @lumex/api",
+    "test": "npm run test --workspace @lumex/jobs",
     "build": "npm run build --workspace @lumex/shared-types && npm run build --workspace @lumex/analytics-core && npm run build --workspace @lumex/lumex-source && npm run build --workspace @lumex/api && npm run build --workspace @lumex/web && npm run build --workspace @lumex/jobs",
     "typecheck": "npm run typecheck --workspace @lumex/shared-types && npm run typecheck --workspace @lumex/analytics-core && npm run typecheck --workspace @lumex/lumex-source && npm run typecheck --workspace @lumex/api && npm run typecheck --workspace @lumex/web && npm run typecheck --workspace @lumex/jobs"
   },

@@ -4,5 +4,6 @@ dist
 .turbo
 coverage
 .env
-.env.local
+.env.*
+!.env.example
 *.log

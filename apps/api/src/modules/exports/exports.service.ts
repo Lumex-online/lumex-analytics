@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import writeXlsxFile, { type SheetData } from "write-excel-file/node";
 import type { ResolvedScope } from "@lumex/shared-types";
 import { getMongoDb, getSourceDb } from "../../database/mongo.js";
 
@@ -576,10 +576,9 @@ async function buildSalesRows(scope: ResolvedScope): Promise<SalesResult[]> {
 export class ExportsService {
   async buildPurchaseWorkbook(): Promise<Buffer> {
     const rows = await buildPurchaseRows();
-    const worksheet = XLSX.utils.json_to_sheet(rows, { header: [...PURCHASE_COLUMNS] });
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Purchase");
-    return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
+    return writeXlsxFile([
+      { sheet: "Purchase", data: sheetData(PURCHASE_COLUMNS, rows) }
+    ]).toBuffer();
   }
 
   async buildSalesWorkbook(scope: ResolvedScope): Promise<Buffer> {
@@ -587,17 +586,31 @@ export class ExportsService {
     const toBuyer = results.filter((result) => result.sheet === "Sales to Buyer").map((result) => result.row);
     const transfers = results.filter((result) => result.sheet === "Internal Transfer").map((result) => result.row);
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet(toBuyer, { header: [...SALES_COLUMNS] }),
-      "Sales to Buyer"
-    );
-    XLSX.utils.book_append_sheet(
-      workbook,
-      XLSX.utils.json_to_sheet(transfers, { header: [...SALES_COLUMNS] }),
-      "Internal Transfer"
-    );
-    return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
+    return writeXlsxFile([
+      { sheet: "Sales to Buyer", data: sheetData(SALES_COLUMNS, toBuyer) },
+      { sheet: "Internal Transfer", data: sheetData(SALES_COLUMNS, transfers) }
+    ]).toBuffer();
   }
+}
+
+function sheetData(columns: readonly string[], rows: RawDoc[]): SheetData {
+  return [
+    [...columns],
+    ...rows.map((row) => columns.map((column) => toCellValue(row[column])))
+  ];
+}
+
+function toCellValue(value: unknown): string | number | boolean | Date | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    value instanceof Date
+  ) {
+    return value;
+  }
+  return String(value);
 }
