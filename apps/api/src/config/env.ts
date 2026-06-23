@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { config as loadDotenv } from "dotenv";
 
 function findWorkspaceRoot(startDir = process.cwd()): string {
   let current = startDir;
@@ -69,16 +70,25 @@ function loadRootEnvFile(): void {
   const fallbackPath = path.join(workspaceRoot, ".env");
 
   if (fs.existsSync(preferredPath)) {
-    process.loadEnvFile?.(preferredPath);
+    loadEnvFile(preferredPath);
     return;
   }
 
   if (fs.existsSync(fallbackPath)) {
-    process.loadEnvFile?.(fallbackPath);
+    loadEnvFile(fallbackPath);
   }
 }
 
 loadRootEnvFile();
+
+function loadEnvFile(filePath: string): void {
+  if (typeof process.loadEnvFile === "function") {
+    process.loadEnvFile(filePath);
+    return;
+  }
+
+  loadDotenv({ path: filePath, quiet: true });
+}
 
 function parseNumber(value: string | undefined, fallback: number): number {
   if (!value) {
