@@ -786,6 +786,25 @@ function hasCanceledStatus(statusList: unknown) {
   });
 }
 
+// Statuses that count an order as a realized sale (shipped/delivered to the buyer).
+// Internal warehouse-transfer statuses (e.g. "ldspl to ld delivered") are intentionally excluded.
+const FULFILLED_ORDER_STATUSES = new Set([
+  "order shipped",
+  "order out for delivery",
+  "order delivered"
+]);
+
+// True when an order has reached a shipped/delivered stage at any point in its status history.
+// For combined orders this reads the combined order_master's own status_list, which is the
+// source of truth for the goods' fulfilment.
+function reachedShippedOrDelivered(statusList: unknown) {
+  return ensureArray(statusList).some((entry) => {
+    const row = entry as RawDocument;
+    const status = normalizeOrderStatus(row.order_status ?? row.status ?? row.name ?? entry);
+    return FULFILLED_ORDER_STATUSES.has(status);
+  });
+}
+
 function stockLookupCandidates(value: RawDocument) {
   return [
     value.Stock_No,
@@ -1376,6 +1395,10 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
     const orderRef = normalizeRef(order.ref);
     let orderWarehouseKey: number | null = null;
 
+    // Combined PARENTS (is_combine:true) are skipped: they are bundling records that stay at
+    // "Order Placed" and carry the same value as their child orders. The child orders carry their
+    // own shipped/delivered status, so they are counted individually (here and in the other order
+    // loops) by their own status — no double-counting with the parent.
     if (orderIsCombined) {
       continue;
     }
@@ -1384,12 +1407,18 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       orderMemoRefIndex.add(`${buyerRawId}:${orderRef}`);
     }
 
-    salesDocuments.push({
-      documentId: `order:${orderId}`,
-      totalValue: Number(asNumber((order.cost as RawDocument | undefined)?.total).toFixed(2)),
-      taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.tax).toFixed(2)),
-      vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
-    });
+    // Sales are only realized once the order has shipped/delivered. Purchase facts and the
+    // memo-conversion index above are still built for every (non-canceled) order.
+    const orderFulfilled = reachedShippedOrDelivered(order.status_list);
+
+    if (orderFulfilled) {
+      salesDocuments.push({
+        documentId: `order:${orderId}`,
+        totalValue: Number(asNumber((order.cost as RawDocument | undefined)?.total).toFixed(2)),
+        taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.tax).toFixed(2)),
+        vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
+      });
+    }
 
     for (const product of orderProducts(order)) {
       const quantity = Math.max(asNumber(product.qty), 1);
@@ -1432,34 +1461,36 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       const purchasePricePerCarat = inventoryVendorPrice || asNumber(product.vendor_price);
       const purchaseValue = Number((purchasePricePerCarat * carat * quantity).toFixed(2));
 
-      pushRow({
-        id: `order:${getOid(order._id) ?? orderDate}:${stockNumber}`,
-        documentId: `order:${orderId}`,
-        date: orderDate,
-        warehouseKey,
-        buyerKey,
-        vendorKey: vendorRawId ? (vendorKeyByRaw.get(vendorRawId) ?? null) : null,
-        productKey: productRecord.key,
-        salesValue,
-        purchaseValue: 0,
-        revenueCostValue: purchaseValue,
-        memoGivenValue: 0,
-        memoConvertedValue: 0,
-        quantity,
-        productType: "stone",
-        shape,
-        size,
-        color,
-        clarity,
-        stockNumber,
-        qcStatus: typeof product.qc_status === "string" ? product.qc_status : "Unknown",
-        status: typeof order.invoice_ind_loc === "string" && order.invoice_ind_loc.length > 0 ? "Invoiced" : "Ordered",
-        sourceType: "sales",
-        orderedUnits: quantity,
-        fulfilledUnits: typeof product.qc_status === "string" && product.qc_status.trim().toLowerCase() === "success"
-          ? quantity
-          : 0
-      });
+      if (orderFulfilled) {
+        pushRow({
+          id: `order:${getOid(order._id) ?? orderDate}:${stockNumber}`,
+          documentId: `order:${orderId}`,
+          date: orderDate,
+          warehouseKey,
+          buyerKey,
+          vendorKey: vendorRawId ? (vendorKeyByRaw.get(vendorRawId) ?? null) : null,
+          productKey: productRecord.key,
+          salesValue,
+          purchaseValue: 0,
+          revenueCostValue: purchaseValue,
+          memoGivenValue: 0,
+          memoConvertedValue: 0,
+          quantity,
+          productType: "stone",
+          shape,
+          size,
+          color,
+          clarity,
+          stockNumber,
+          qcStatus: typeof product.qc_status === "string" ? product.qc_status : "Unknown",
+          status: typeof order.invoice_ind_loc === "string" && order.invoice_ind_loc.length > 0 ? "Invoiced" : "Ordered",
+          sourceType: "sales",
+          orderedUnits: quantity,
+          fulfilledUnits: typeof product.qc_status === "string" && product.qc_status.trim().toLowerCase() === "success"
+            ? quantity
+            : 0
+        });
+      }
 
       if (purchaseValue > 0) {
         pushRow({
@@ -1593,6 +1624,11 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       continue;
     }
 
+    // Only count loose-lot orders that have shipped/delivered.
+    if (!reachedShippedOrDelivered(order.status_list)) {
+      continue;
+    }
+
     const buyerRawId = getOid(order.buyer_id);
     const buyerKey = buyerRawId ? (buyerKeyByRaw.get(buyerRawId) ?? null) : null;
     const sourceOrder = looseLotsById.get(getOid(order.order_id) ?? "");
@@ -1661,6 +1697,11 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
 
   for (const order of rawOwnShapeOrders) {
     if (hasCanceledStatus(order.status_list)) {
+      continue;
+    }
+
+    // Only count own-shape orders that have shipped/delivered.
+    if (!reachedShippedOrDelivered(order.status_list)) {
       continue;
     }
 

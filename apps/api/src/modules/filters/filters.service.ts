@@ -2,9 +2,19 @@ import type { DashboardFiltersMetadata, DashboardKey } from "@lumex/shared-types
 import { getLumexDataset } from "@lumex/lumex-source";
 import { env } from "../../config/env.js";
 import { getMongoDb } from "../../database/mongo.js";
-import { getDatasetMetadataMongo, getDistinctRowValuesMongo } from "../dashboards/mongo-analytics.js";
+import { getDistinctRowValuesMongo } from "../dashboards/mongo-analytics.js";
 import type { PermissionRepository } from "../permissions/permissions.repository.js";
 import type { PermissionService } from "../permissions/permissions.service.js";
+
+function currentMonthRange(): { from: string; to: string } {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const from = `${year}-${pad(month + 1)}-01`;
+  const to = `${year}-${pad(month + 1)}-${pad(now.getUTCDate())}`;
+  return { from, to };
+}
 
 export class FiltersService {
   constructor(
@@ -33,7 +43,6 @@ export class FiltersService {
     const scopedSkus = scope.allowSkuAnalytics ? skus : [];
     const mongoDb = this.analyticsStore === "mongo" ? await getMongoDb() : null;
     const dataset = mongoDb ? null : getLumexDataset();
-    const mongoMetadata = mongoDb ? await getDatasetMetadataMongo(mongoDb) : null;
     const mongoDistinct = mongoDb ? await getDistinctRowValuesMongo(mongoDb) : null;
     const productTypes = mongoDistinct?.productTypes ?? [...new Set((dataset?.rows ?? []).map((row) => row.productType))].sort();
     const statuses = mongoDistinct?.statuses ?? [...new Set((dataset?.rows ?? []).map((row) => row.status))].sort();
@@ -62,10 +71,8 @@ export class FiltersService {
       productTypes,
       statuses,
       defaults: {
-        dateRange: {
-          from: mongoMetadata?.minDate ?? dataset?.minDate ?? "1970-01-01",
-          to: mongoMetadata?.maxDate ?? dataset?.maxDate ?? "1970-01-01"
-        }
+        // Default the dashboard to the current month; users can widen/adjust as needed.
+        dateRange: currentMonthRange()
       },
       filterVisibility: scope.filterVisibility
     };

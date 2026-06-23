@@ -162,6 +162,9 @@ function toInventorySnapshotDocument(dataset: LumexDataset, batchId: number, sna
 async function persistRows(db: Db, dataset: LumexDataset, batchId: number, sourceType: LumexAnalyticsRow["sourceType"]) {
   const rows = dataset.rows.filter((row) => row.sourceType === sourceType);
   await bulkWriteUpsert(db.collection("analytics_rows"), rows, toAnalyticsRowDocument(dataset, batchId));
+  // Remove rows of this source type that were not part of the current batch (e.g. orders that
+  // no longer qualify as sales, or were canceled), so the warehouse reflects only current facts.
+  await db.collection("analytics_rows").deleteMany({ sourceType, etlBatchId: { $ne: batchId } });
   return rows.length;
 }
 
@@ -180,6 +183,7 @@ export async function persistSalesFacts(db: Db, dataset: LumexDataset, batchId: 
       updatedAt: new Date()
     })
   );
+  await db.collection("analytics_sales_documents").deleteMany({ etlBatchId: { $ne: batchId } });
   await persistReturnFacts(db, dataset, batchId);
   return count;
 }

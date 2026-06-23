@@ -281,14 +281,60 @@ function AlertStrip({ alerts }: { alerts: ExecutiveAlert[] }) {
   );
 }
 
+const TREND_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Adapt the trend's x-axis granularity to the selected span: day view for short ranges,
+// month view (with year) for up to ~3 years, year view beyond that — so a wide filter
+// doesn't render hundreds of sparse daily points with year-less labels.
+function bucketTrend(trend: { categories?: string[]; sales?: number[]; purchase?: number[]; orders?: number[]; buyers?: number[] }) {
+  const dates = trend.categories ?? [];
+  const empty = { categories: [] as string[], labels: [] as string[], sales: [] as number[], purchase: [] as number[], orders: [] as number[], buyers: [] as number[] };
+  if (dates.length === 0) {
+    return empty;
+  }
+
+  const spanDays = (Date.parse(dates[dates.length - 1] ?? "") - Date.parse(dates[0] ?? "")) / 86_400_000;
+  const unit: "day" | "month" | "year" = spanDays <= 92 ? "day" : spanDays <= 1100 ? "month" : "year";
+  const keyOf = (date: string) => (unit === "day" ? date : unit === "month" ? date.slice(0, 7) : date.slice(0, 4));
+  const labelOf = (key: string) => {
+    if (unit === "year") return key;
+    const parts = key.split("-");
+    const monthName = TREND_MONTHS[Number(parts[1]) - 1] ?? "";
+    return unit === "month" ? `${monthName} ${(parts[0] ?? "").slice(2)}` : `${monthName} ${parts[2] ?? ""}`;
+  };
+
+  const buckets = new Map<string, { sales: number; purchase: number; orders: number; buyers: number }>();
+  dates.forEach((date, index) => {
+    const key = keyOf(date);
+    const bucket = buckets.get(key) ?? { sales: 0, purchase: 0, orders: 0, buyers: 0 };
+    bucket.sales += trend.sales?.[index] ?? 0;
+    bucket.purchase += trend.purchase?.[index] ?? 0;
+    bucket.orders += trend.orders?.[index] ?? 0;
+    bucket.buyers = Math.max(bucket.buyers, trend.buyers?.[index] ?? 0); // snapshot, not a sum
+    buckets.set(key, bucket);
+  });
+
+  const entries = [...buckets.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  return {
+    categories: entries.map(([key]) => key),
+    labels: entries.map(([key]) => labelOf(key)),
+    sales: entries.map(([, b]) => b.sales),
+    purchase: entries.map(([, b]) => b.purchase),
+    orders: entries.map(([, b]) => b.orders),
+    buyers: entries.map(([, b]) => b.buyers)
+  };
+}
+
 function TrendChart({
   title,
   categories,
+  labels,
   series,
   valueMode
 }: {
   title: string;
   categories: string[];
+  labels?: string[];
   series: ChartSeries[];
   valueMode: "currency" | "count";
 }) {
@@ -389,7 +435,7 @@ function TrendChart({
               className="trend-chart__label"
               textAnchor="middle"
             >
-              {categories.length > 8 && index % Math.ceil(categories.length / 6) !== 0 ? "" : category.slice(5)}
+              {categories.length > 8 && index % Math.ceil(categories.length / 6) !== 0 ? "" : (labels?.[index] ?? category.slice(5))}
             </text>
           ))}
         </svg>
@@ -725,7 +771,7 @@ function HeatmapCard({ title, matrix }: { title: string; matrix: HeatmapMatrix }
                     key={`${rowLabel}-${matrix.columnLabels[columnIndex]}`}
                     className="heatmap-card__cell"
                     style={{
-                      backgroundColor: `rgba(22, 91, 86, ${0.12 + (value / maxValue) * 0.78})`
+                      backgroundColor: `rgba(42, 106, 163, ${0.12 + (value / maxValue) * 0.78})`
                     }}
                   >
                     {value}
@@ -846,13 +892,15 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
     );
   }
 
+  const bucketedTrend = bucketTrend(executiveQuery.data.salesTrend);
   const trendData = {
-    categories: executiveQuery.data.salesTrend.categories ?? [],
+    categories: bucketedTrend.categories,
+    labels: bucketedTrend.labels,
     series: {
-      sales: [{ name: "Sales", data: executiveQuery.data.salesTrend.sales ?? [] }],
-      purchase: [{ name: "Purchase", data: executiveQuery.data.salesTrend.purchase ?? [] }],
-      orders: [{ name: "Order Count", data: executiveQuery.data.salesTrend.orders ?? [] }],
-      buyers: [{ name: "Verified Buyers", data: executiveQuery.data.salesTrend.buyers ?? [] }]
+      sales: [{ name: "Sales", data: bucketedTrend.sales }],
+      purchase: [{ name: "Purchase", data: bucketedTrend.purchase }],
+      orders: [{ name: "Order Count", data: bucketedTrend.orders }],
+      buyers: [{ name: "Verified Buyers", data: bucketedTrend.buyers }]
     }
   };
   const trendLabelByMetric = {
@@ -973,6 +1021,34 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
             </button>
           </label>
         ) : null}
+        {permissionsQuery.data.allowExport ? (
+          <label className="filter-control filter-control--toggle">
+            <span>Export</span>
+            <button
+              type="button"
+              className="view-toggle"
+              onClick={() => {
+                void apiClient.downloadPurchaseWorkbook();
+              }}
+            >
+              Download Purchase
+            </button>
+          </label>
+        ) : null}
+        {permissionsQuery.data.allowExport ? (
+          <label className="filter-control filter-control--toggle">
+            <span>Export</span>
+            <button
+              type="button"
+              className="view-toggle"
+              onClick={() => {
+                void apiClient.downloadSalesWorkbook();
+              }}
+            >
+              Download Sales
+            </button>
+          </label>
+        ) : null}
       </section>
 
       {buyerLensDisabled ? (
@@ -980,8 +1056,6 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
           Global values mode is on. Buyer filters and buyer-specific charts are hidden for this sub-admin view.
         </div>
       ) : null}
-
-      <AlertStrip alerts={executiveQuery.data.alerts} />
 
       <section className="executive-kpi-grid">
         {executiveQuery.data.kpis.map((item) => (
@@ -1023,6 +1097,7 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
         <TrendChart
           title={trendTitleByMetric[trendMetric]}
           categories={trendData.categories}
+          labels={trendData.labels}
           series={trendData.series[trendMetric]}
           valueMode={trendModeByMetric[trendMetric]}
         />

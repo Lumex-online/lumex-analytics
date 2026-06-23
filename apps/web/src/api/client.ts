@@ -75,9 +75,33 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   throw new Error(`Request failed: ${lastStatus}`);
 }
 
+async function downloadFile(path: string, filename: string) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { "x-source-user-id": activeSourceUserId }
+  });
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.status}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const apiClient = {
   getMyPermissions() {
     return request<PermissionMetadataResponse>("/me/permissions");
+  },
+  downloadPurchaseWorkbook() {
+    return downloadFile("/exports/purchase", "purchase-online.xlsx");
+  },
+  downloadSalesWorkbook() {
+    return downloadFile("/exports/sales", "sales-online.xlsx");
   },
   getFilters(dashboardKey: DashboardKey) {
     return request<DashboardFiltersMetadata>(`/metadata/filters?dashboardKey=${dashboardKey}`);

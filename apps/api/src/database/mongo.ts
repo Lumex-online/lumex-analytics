@@ -8,6 +8,8 @@ const LOCAL_UNAUTHENTICATED_LOG =
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
+let sourceClient: MongoClient | null = null;
+let sourceDb: Db | null = null;
 let distinctUsersLogged = false;
 
 function usernameFromMongoUri(uri: string, label: string): string | null {
@@ -94,13 +96,30 @@ export async function getMongoDb(): Promise<Db> {
   return db;
 }
 
-export async function closeMongoClient(): Promise<void> {
-  if (!client) {
-    return;
+// Read-only connection to the source Lumex database (orders, purchases, vendors, etc.).
+export async function getSourceDb(): Promise<Db> {
+  if (!env.LUMEX_MONGO_URI.trim()) {
+    throw new Error("LUMEX_MONGO_URI is not configured.");
   }
 
-  const currentClient = client;
+  if (!sourceClient) {
+    sourceClient = new MongoClient(env.LUMEX_MONGO_URI);
+    await sourceClient.connect();
+    sourceDb = sourceClient.db(env.LUMEX_MONGO_DATABASE);
+  }
+
+  if (!sourceDb) {
+    throw new Error("Source Mongo database was not initialized.");
+  }
+
+  return sourceDb;
+}
+
+export async function closeMongoClient(): Promise<void> {
+  const clients = [client, sourceClient].filter((value): value is MongoClient => value !== null);
   client = null;
   db = null;
-  await currentClient.close();
+  sourceClient = null;
+  sourceDb = null;
+  await Promise.all(clients.map((value) => value.close()));
 }

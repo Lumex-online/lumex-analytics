@@ -13,6 +13,9 @@ import { DrilldownsService } from "./modules/drilldowns/drilldowns.service.js";
 import { ExecutiveDashboardController } from "./modules/executive-dashboard/executive-dashboard.controller.js";
 import { registerExecutiveDashboardRoutes } from "./modules/executive-dashboard/executive-dashboard.routes.js";
 import { ExecutiveDashboardService } from "./modules/executive-dashboard/executive-dashboard.service.js";
+import { ExportsController } from "./modules/exports/exports.controller.js";
+import { registerExportsRoutes } from "./modules/exports/exports.routes.js";
+import { ExportsService } from "./modules/exports/exports.service.js";
 import { FiltersController } from "./modules/filters/filters.controller.js";
 import { FiltersService } from "./modules/filters/filters.service.js";
 import { registerFiltersRoutes } from "./modules/filters/filters.routes.js";
@@ -77,6 +80,7 @@ export async function buildApp() {
   const executiveDashboardService = new ExecutiveDashboardService(permissionService, kpiTargetService);
   const skuAnalyticsService = new SkuAnalyticsService(permissionService);
   const memoConversionService = new MemoConversionService(permissionService);
+  const exportsService = new ExportsService();
 
   const healthController = new HealthController();
   const kpiTargetController = new KpiTargetController(kpiTargetService);
@@ -87,6 +91,7 @@ export async function buildApp() {
   const adminAccessController = new AdminAccessController(permissionService);
   const executiveDashboardController = new ExecutiveDashboardController(executiveDashboardService);
   const skuAnalyticsController = new SkuAnalyticsController(skuAnalyticsService);
+  const exportsController = new ExportsController(exportsService);
   const memoConversionController = new MemoConversionController(memoConversionService);
 
   app.addHook("onRequest", authenticateRequest(permissionService));
@@ -101,6 +106,7 @@ export async function buildApp() {
   await app.register(registerExecutiveDashboardRoutes, { controller: executiveDashboardController });
   await app.register(registerSkuAnalyticsRoutes, { controller: skuAnalyticsController });
   await app.register(registerMemoConversionRoutes, { controller: memoConversionController });
+  await app.register(registerExportsRoutes, { controller: exportsController });
 
   app.addHook("onClose", async () => {
     await closeMongoClient();
