@@ -75,6 +75,15 @@ export async function buildApp() {
     credentials: true
   });
 
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.url.startsWith("/api/v1/")) {
+      reply.header("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      reply.header("Pragma", "no-cache");
+      reply.header("Expires", "0");
+      reply.header("Surrogate-Control", "no-store");
+    }
+  });
+
   configureLumexSource({
     mode: env.LUMEX_DATA_SOURCE,
     apiBaseUrl: env.LUMEX_API_BASE_URL,

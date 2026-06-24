@@ -1,5 +1,7 @@
 export const ANALYTICS_EMBED_READY_EVENT = "lumex-analytics:ready";
 export const ANALYTICS_EMBED_RESIZE_EVENT = "lumex-analytics:resize";
+export const ANALYTICS_EMBED_TOKEN_REFRESH_REQUEST_EVENT = "lumex-analytics:token-refresh-request";
+export const ANALYTICS_EMBED_TOKEN_REFRESH_RESPONSE_EVENT = "lumex-analytics:token-refresh-response";
 
 export function resolveRequestedUserId(search: string) {
   const searchParams = new URLSearchParams(search);

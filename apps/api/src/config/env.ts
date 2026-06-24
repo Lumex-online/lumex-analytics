@@ -32,10 +32,17 @@ function findWorkspaceRoot(startDir = process.cwd()): string {
 
 function envFileFromAlias(value: string): string | null {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "local") return ".env.local";
+  if (normalized === "local") return ".env";
   if (normalized === "dev" || normalized === "development") return ".env.dev";
   if (normalized === "prod" || normalized === "production") return ".env.prod";
   return null;
+}
+
+function parseAnalyticsEnv(value: string | undefined): "local" | "dev" | "prod" {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "dev" || normalized === "development") return "dev";
+  if (normalized === "prod" || normalized === "production") return "prod";
+  return "local";
 }
 
 function selectedEnvFile(): string {
@@ -51,14 +58,14 @@ function selectedEnvFile(): string {
   }
 
   const lifecycle = process.env.npm_lifecycle_event?.toLowerCase() ?? "";
-  if (lifecycle === "start" || lifecycle === "start:once" || lifecycle === "db:setup" || lifecycle.includes("prod")) {
-    return ".env.prod";
-  }
   if (lifecycle === "dev:dev") {
     return ".env.dev";
   }
+  if (lifecycle.includes("prod")) {
+    return ".env.prod";
+  }
   if (lifecycle.includes("dev")) {
-    return ".env.local";
+    return ".env";
   }
 
   return ".env";
@@ -115,9 +122,10 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 export const env = {
+  ANALYTICS_ENV: parseAnalyticsEnv(process.env.ANALYTICS_ENV),
   NODE_ENV:
     process.env.NODE_ENV ??
-    (envFileFromAlias(process.env.ANALYTICS_ENV ?? "") === ".env.prod" ? "production" : "development"),
+    (parseAnalyticsEnv(process.env.ANALYTICS_ENV) === "prod" ? "production" : "development"),
   PORT: parseNumber(process.env.PORT, 4001),
   WEB_ORIGIN: process.env.WEB_ORIGIN ?? "http://localhost:5173",
   DEFAULT_SOURCE_USER_ID: parseNumber(process.env.DEFAULT_SOURCE_USER_ID, 1),
@@ -126,6 +134,7 @@ export const env = {
   ANALYTICS_PROXY_SECRET_HEADER:
     process.env.ANALYTICS_PROXY_SECRET_HEADER ?? "x-analytics-proxy-secret",
   ANALYTICS_PROXY_SECRET: process.env.ANALYTICS_PROXY_SECRET ?? "",
+  ANALYTICS_EMBED_TOKEN_SECRET: process.env.ANALYTICS_EMBED_TOKEN_SECRET ?? "",
   ANALYTICS_STORE: (process.env.ANALYTICS_STORE?.trim().toLowerCase() === "mongo"
     ? "mongo"
     : "bootstrap") as "bootstrap" | "mongo",
@@ -158,12 +167,30 @@ function uriHasUsername(uri: string): boolean {
   }
 }
 
+function validateSecureEnv(): void {
+  if (env.ANALYTICS_ENV === "local") {
+    return;
+  }
+
+  const errors: string[] = [];
+  if (!env.ANALYTICS_EMBED_TOKEN_SECRET.trim()) {
+    errors.push("ANALYTICS_EMBED_TOKEN_SECRET is required when ANALYTICS_ENV is dev or prod.");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid secure analytics configuration:\n- ${errors.join("\n- ")}`);
+  }
+}
+
 function validateProductionEnv(): void {
   if (env.NODE_ENV !== "production") {
     return;
   }
 
   const errors: string[] = [];
+  if (env.ANALYTICS_ENV !== "prod") {
+    errors.push("ANALYTICS_ENV must be prod when NODE_ENV=production.");
+  }
   if (env.ANALYTICS_STORE !== "mongo") {
     errors.push("ANALYTICS_STORE must be mongo in production.");
   }
@@ -182,10 +209,14 @@ function validateProductionEnv(): void {
   if (!env.ANALYTICS_PROXY_SECRET.trim()) {
     errors.push("ANALYTICS_PROXY_SECRET is required in production.");
   }
+  if (!env.ANALYTICS_EMBED_TOKEN_SECRET.trim()) {
+    errors.push("ANALYTICS_EMBED_TOKEN_SECRET is required in production.");
+  }
 
   if (errors.length > 0) {
     throw new Error(`Invalid production analytics configuration:\n- ${errors.join("\n- ")}`);
   }
 }
 
+validateSecureEnv();
 validateProductionEnv();

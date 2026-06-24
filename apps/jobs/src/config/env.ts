@@ -32,7 +32,7 @@ function findWorkspaceRoot(startDir = process.cwd()): string {
 
 function envFileFromAlias(value: string): string | null {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "local") return ".env.local";
+  if (normalized === "local") return ".env";
   if (normalized === "dev" || normalized === "development") return ".env.dev";
   if (normalized === "prod" || normalized === "production") return ".env.prod";
   return null;
@@ -51,14 +51,14 @@ function selectedEnvFile(): string {
   }
 
   const lifecycle = process.env.npm_lifecycle_event?.toLowerCase() ?? "";
-  if (lifecycle === "start" || lifecycle === "start:once" || lifecycle === "db:setup" || lifecycle.includes("prod")) {
-    return ".env.prod";
-  }
   if (lifecycle === "dev:dev") {
     return ".env.dev";
   }
+  if (lifecycle.includes("prod")) {
+    return ".env.prod";
+  }
   if (lifecycle.includes("dev")) {
-    return ".env.local";
+    return ".env";
   }
 
   return ".env";

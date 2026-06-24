@@ -15,6 +15,11 @@ import type {
   UpdateKpiTargetInput,
   UpdateSubAdminAccessInput
 } from "@lumex/shared-types";
+import {
+  getEmbedToken,
+  isLocalAnalyticsEnv,
+  requestEmbedTokenRefresh
+} from "../lib/analyticsAuth";
 import { resolveRequestedUserId } from "../lib/embed";
 
 const API_BASE_URL =
@@ -46,16 +51,48 @@ let activeSourceUserId: string =
 function buildRequestHeaders(sourceUserId: string, initHeaders?: HeadersInit): Headers {
   const headers = new Headers(initHeaders);
   headers.set("Content-Type", "application/json");
-  if (import.meta.env.DEV) {
+  headers.set("Cache-Control", "no-store");
+  headers.set("Pragma", "no-cache");
+  if (isLocalAnalyticsEnv()) {
     headers.set("x-source-user-id", sourceUserId);
+  } else {
+    const token = getEmbedToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
   }
   return headers;
 }
 
+async function secureRequest<T>(path: string, init?: RequestInit, hasRetried = false): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    cache: "no-store",
+    headers: buildRequestHeaders(activeSourceUserId, init?.headers)
+  });
+
+  if (response.ok) {
+    return response.json() as Promise<T>;
+  }
+
+  if (response.status === 401 && !hasRetried) {
+    const refreshedToken = await requestEmbedTokenRefresh();
+    if (refreshedToken) {
+      return secureRequest<T>(path, init, true);
+    }
+  }
+
+  throw new Error(`Request failed: ${response.status}`);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!isLocalAnalyticsEnv()) {
+    return secureRequest<T>(path, init);
+  }
+
   const candidateSourceUserIds = urlSourceUserId
     ? [activeSourceUserId]
-    : import.meta.env.DEV
+    : isLocalAnalyticsEnv()
     ? [activeSourceUserId, ...seededDevSourceIds.filter((sourceUserId) => sourceUserId !== activeSourceUserId)]
     : [activeSourceUserId];
   let lastStatus = 500;
@@ -63,6 +100,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   for (const sourceUserId of candidateSourceUserIds) {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
+      cache: "no-store",
       headers: buildRequestHeaders(sourceUserId, init?.headers)
     });
 
@@ -72,7 +110,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
 
     lastStatus = response.status;
-    if (response.status !== 401 || !import.meta.env.DEV) {
+    if (response.status !== 401 || !isLocalAnalyticsEnv()) {
       throw new Error(`Request failed: ${response.status}`);
     }
   }
@@ -80,14 +118,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   throw new Error(`Request failed: ${lastStatus}`);
 }
 
-async function downloadFile(path: string, filename: string) {
+async function downloadFile(path: string, filename: string, hasRetried = false) {
   const headers = new Headers();
-  if (import.meta.env.DEV) {
+  headers.set("Cache-Control", "no-store");
+  headers.set("Pragma", "no-cache");
+  if (isLocalAnalyticsEnv()) {
     headers.set("x-source-user-id", activeSourceUserId);
+  } else {
+    const token = getEmbedToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
   }
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    cache: "no-store",
     headers
   });
+  if (response.status === 401 && !isLocalAnalyticsEnv() && !hasRetried) {
+    const refreshedToken = await requestEmbedTokenRefresh();
+    if (refreshedToken) {
+      return downloadFile(path, filename, true);
+    }
+  }
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status}`);
   }

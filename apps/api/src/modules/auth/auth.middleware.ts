@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { jwtVerify, type JWTPayload } from "jose";
 import { timingSafeEqual } from "node:crypto";
 import { env } from "../../config/env.js";
 import type { PermissionService } from "../permissions/permissions.service.js";
@@ -33,21 +34,66 @@ function extractDevelopmentAuthUserId(request: FastifyRequest): string {
   return String(env.DEFAULT_SOURCE_USER_ID);
 }
 
-function extractProductionAuthUserId(request: FastifyRequest): string | null {
+function extractTrustedProxyAuthUserId(request: FastifyRequest): string | null {
   const proxySecret = getHeaderValue(request, env.ANALYTICS_PROXY_SECRET_HEADER);
-  if (!proxySecret || !secretsMatch(proxySecret, env.ANALYTICS_PROXY_SECRET)) {
+  if (!proxySecret || !env.ANALYTICS_PROXY_SECRET || !secretsMatch(proxySecret, env.ANALYTICS_PROXY_SECRET)) {
     return null;
   }
 
   return getHeaderValue(request, env.ANALYTICS_PROXY_USER_HEADER);
 }
 
-function extractAuthUserId(request: FastifyRequest): string | null {
-  if (env.NODE_ENV === "production") {
-    return extractProductionAuthUserId(request);
+function pickString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isAllowedWebsiteRole(value: unknown): boolean {
+  return value === "super_admin" || value === "sub_admin";
+}
+
+async function extractEmbedTokenAuthUserId(request: FastifyRequest): Promise<string | null> {
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
+    return null;
   }
 
-  return extractDevelopmentAuthUserId(request);
+  const token = authorization.slice("Bearer ".length).trim();
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const secret = new TextEncoder().encode(env.ANALYTICS_EMBED_TOKEN_SECRET);
+    const { payload } = await jwtVerify<JWTPayload & {
+      websiteUserId?: unknown;
+      websiteRole?: unknown;
+    }>(token, secret, {
+      algorithms: ["HS256"],
+      audience: "lumex-analytics",
+      issuer: "lumex-backend"
+    });
+
+    if (!isAllowedWebsiteRole(payload.websiteRole)) {
+      return null;
+    }
+
+    return pickString(payload.websiteUserId) ?? pickString(payload.sub);
+  } catch {
+    return null;
+  }
+}
+
+async function extractAuthUserId(request: FastifyRequest): Promise<string | null> {
+  if (env.ANALYTICS_ENV === "local") {
+    return extractDevelopmentAuthUserId(request);
+  }
+
+  const proxyUserId = extractTrustedProxyAuthUserId(request);
+  if (proxyUserId) {
+    return proxyUserId;
+  }
+
+  return extractEmbedTokenAuthUserId(request);
 }
 
 export function authenticateRequest(permissionService: PermissionService) {
@@ -56,11 +102,11 @@ export function authenticateRequest(permissionService: PermissionService) {
       return;
     }
 
-    const authUserId = extractAuthUserId(request);
+    const authUserId = await extractAuthUserId(request);
     if (!authUserId) {
       return reply.code(401).send({
         code: "AUTH_REQUIRED",
-        message: "Analytics requests must be authenticated by the trusted proxy."
+        message: "Analytics requests must be authenticated."
       });
     }
 
