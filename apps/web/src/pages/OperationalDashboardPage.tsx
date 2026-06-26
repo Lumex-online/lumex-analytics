@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type {
   BreakdownItem,
@@ -816,6 +816,8 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
   const [trendMetric, setTrendMetric] = useState<"sales" | "purchase" | "orders" | "buyers">("sales");
   const [returnTrendRange, setReturnTrendRange] = useState({ from: "", to: "" });
   const [viewMode, setViewMode] = useState<"scoped" | "global_totals">("scoped");
+  const [exporting, setExporting] = useState<"purchase" | "sales" | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const isSubAdmin = permissionsQuery.data?.user.analyticsRole === "sub_admin";
   const buyerLensDisabled = isSubAdmin && viewMode === "global_totals";
@@ -862,6 +864,26 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
     enabled: Boolean(filtersQuery.data),
     queryFn: () => apiClient.getExecutiveDashboard(effectiveFilters)
   });
+
+  const handleExport = useCallback(
+    async (type: "purchase" | "sales") => {
+      setExporting(type);
+      setExportError(null);
+
+      try {
+        if (type === "purchase") {
+          await apiClient.downloadPurchaseWorkbook(effectiveFilters);
+        } else {
+          await apiClient.downloadSalesWorkbook(effectiveFilters);
+        }
+      } catch {
+        setExportError(`Unable to download ${type} report for the selected filters.`);
+      } finally {
+        setExporting(null);
+      }
+    },
+    [effectiveFilters]
+  );
 
   if (permissionsQuery.isLoading || filtersQuery.isLoading || executiveQuery.isLoading) {
     return (
@@ -1021,17 +1043,18 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
             </button>
           </label>
         ) : null}
-        {permissionsQuery.data.allowExport ? (
+        {permissionsQuery.data.allowExport && permissionsQuery.data.allowPurchaseVisibility ? (
           <label className="filter-control filter-control--toggle">
             <span>Export</span>
             <button
               type="button"
-              className="view-toggle"
+              className={`view-toggle ${exporting === "purchase" ? "view-toggle--active" : ""}`}
+              disabled={exporting !== null}
               onClick={() => {
-                void apiClient.downloadPurchaseWorkbook();
+                void handleExport("purchase");
               }}
             >
-              Download Purchase
+              {exporting === "purchase" ? "Downloading..." : "Download Purchase"}
             </button>
           </label>
         ) : null}
@@ -1040,16 +1063,19 @@ export function OperationalDashboardPage({ embedded = false }: { embedded?: bool
             <span>Export</span>
             <button
               type="button"
-              className="view-toggle"
+              className={`view-toggle ${exporting === "sales" ? "view-toggle--active" : ""}`}
+              disabled={exporting !== null}
               onClick={() => {
-                void apiClient.downloadSalesWorkbook();
+                void handleExport("sales");
               }}
             >
-              Download Sales
+              {exporting === "sales" ? "Downloading..." : "Download Sales"}
             </button>
           </label>
         ) : null}
       </section>
+
+      {exportError ? <div className="view-mode-note">{exportError}</div> : null}
 
       {buyerLensDisabled ? (
         <div className="view-mode-note">

@@ -626,8 +626,8 @@ export class ExecutiveDashboardService {
       filterReturnRowsMongo(db, previousFilters),
       getDimensionMapsMongo(db)
     ]);
-    const currentSalesRows = currentRows.filter((row) => row.salesValue > 0);
-    const previousSalesRows = previousRows.filter((row) => row.salesValue > 0);
+    const currentSalesRows = currentRows.filter((row) => row.sourceType === "sales");
+    const previousSalesRows = previousRows.filter((row) => row.sourceType === "sales");
     const currentPurchaseRows = currentRows.filter((row) => row.purchaseValue > 0);
     const previousPurchaseRows = previousRows.filter((row) => row.purchaseValue > 0);
     const currentMemoRows = currentRows.filter((row) => row.memoGivenValue > 0);
@@ -897,8 +897,8 @@ export class ExecutiveDashboardService {
         to: previousRange.to
       }
     });
-    const currentSalesRows = currentRows.filter((row) => row.salesValue > 0);
-    const previousSalesRows = previousRows.filter((row) => row.salesValue > 0);
+    const currentSalesRows = currentRows.filter((row) => row.sourceType === "sales");
+    const previousSalesRows = previousRows.filter((row) => row.sourceType === "sales");
     const currentPurchaseRows = currentRows.filter((row) => row.purchaseValue > 0);
     const previousPurchaseRows = previousRows.filter((row) => row.purchaseValue > 0);
     const currentMemoRows = currentRows.filter((row) => row.memoGivenValue > 0);

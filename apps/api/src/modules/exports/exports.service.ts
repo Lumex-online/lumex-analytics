@@ -1,8 +1,45 @@
 import writeXlsxFile, { type SheetData } from "write-excel-file/node";
-import type { ResolvedScope } from "@lumex/shared-types";
+import { applyScopeToFilters } from "@lumex/analytics-core";
+import type { DashboardFiltersInput, ResolvedScope } from "@lumex/shared-types";
+import { ObjectId, type Document, type Filter } from "mongodb";
 import { getMongoDb, getSourceDb } from "../../database/mongo.js";
 
 type RawDoc = Record<string, any>;
+type ExportSourceType = "sales" | "purchase" | "memo";
+
+interface ExportAnalyticsRow {
+  documentId: string;
+  date?: string;
+  stockNumber?: string;
+  sourceType: ExportSourceType;
+  orderDate?: Date;
+  warehouseKey?: number | null;
+  buyerKey?: number | null;
+  buyer?: { name?: string } | null;
+  subAdminKeys?: number[];
+  vendorKey?: number | null;
+  productKey?: number | null;
+  salesValue?: number;
+  shape?: string;
+  size?: string;
+  color?: string;
+  clarity?: string;
+  productType?: string;
+  status?: string;
+  quantity?: number;
+  purchaseValue?: number;
+}
+
+interface ExportSalesDocument {
+  documentId: string;
+  totalValue: number;
+}
+
+interface ExportFilterIndex {
+  documentIds: Set<string>;
+  stockNumbersByDocumentId: Map<string, Set<string>>;
+  rowsByDocumentId: Map<string, ExportAnalyticsRow[]>;
+}
 
 const PURCHASE_COLUMNS = [
   "ORDER DATE",
@@ -13,6 +50,10 @@ const PURCHASE_COLUMNS = [
   "Status",
   "Terms",
   "Total carat",
+  "Net ($)",
+  "GROSS($)",
+  "Exchange Rate",
+  "Exchange Rate Source",
   "Net (Rs)",
   "GROSS(Rs)",
   "Month",
@@ -32,6 +73,168 @@ function round(value: number): number {
 
 function asArray(value: unknown): RawDoc[] {
   return Array.isArray(value) ? value : [];
+}
+
+function parseDateAtUtcMidnight(date: string): Date {
+  return new Date(`${date}T00:00:00.000Z`);
+}
+
+function buildExportMatch(sourceTypes: ExportSourceType[], filters: DashboardFiltersInput): Filter<Document> {
+  const match: Filter<Document> = {
+    sourceType: sourceTypes.length === 1 ? sourceTypes[0] : { $in: sourceTypes }
+  };
+
+  if (filters.warehouseKeys && filters.warehouseKeys.length > 0) {
+    match.warehouseKey = { $in: filters.warehouseKeys };
+  }
+  if (filters.buyerKeys && filters.buyerKeys.length > 0) {
+    match.buyerKey = { $in: filters.buyerKeys };
+  }
+  if (filters.subAdminKeys && filters.subAdminKeys.length > 0) {
+    match.subAdminKeys = { $in: filters.subAdminKeys };
+  }
+  if (filters.vendorKeys && filters.vendorKeys.length > 0) {
+    match.vendorKey = { $in: filters.vendorKeys };
+  }
+  if (filters.skuKeys && filters.skuKeys.length > 0) {
+    match.productKey = { $in: filters.skuKeys };
+  }
+  if (filters.shape) {
+    match.shape = filters.shape.toUpperCase();
+  }
+  if (filters.size) {
+    match.size = filters.size;
+  }
+  if (filters.color) {
+    match.color = filters.color;
+  }
+  if (filters.clarity) {
+    match.clarity = filters.clarity;
+  }
+  if (filters.productType) {
+    match.productType = filters.productType;
+  }
+  if (filters.status) {
+    match.status = filters.status;
+  }
+  if (filters.dateRange?.from || filters.dateRange?.to) {
+    match.orderDate = {
+      ...(filters.dateRange.from ? { $gte: parseDateAtUtcMidnight(filters.dateRange.from) } : {}),
+      ...(filters.dateRange.to ? { $lte: parseDateAtUtcMidnight(filters.dateRange.to) } : {})
+    };
+  }
+
+  return match;
+}
+
+async function buildExportFilterIndex(
+  scope: ResolvedScope,
+  filters: DashboardFiltersInput,
+  sourceTypes: ExportSourceType[]
+): Promise<ExportFilterIndex> {
+  const scoped = applyScopeToFilters(scope, {
+    ...filters,
+    viewMode: "scoped"
+  });
+  const db = await getMongoDb();
+  const rows = await db
+    .collection<ExportAnalyticsRow>("analytics_rows")
+    .find(buildExportMatch(sourceTypes, scoped.filters), {
+      projection: {
+        documentId: 1,
+        date: 1,
+        stockNumber: 1,
+        sourceType: 1,
+        orderDate: 1,
+        buyer: 1,
+        salesValue: 1,
+        purchaseValue: 1,
+        quantity: 1,
+        productType: 1
+      }
+    })
+    .toArray();
+  const documentIds = new Set<string>();
+  const stockNumbersByDocumentId = new Map<string, Set<string>>();
+  const rowsByDocumentId = new Map<string, ExportAnalyticsRow[]>();
+
+  for (const row of rows) {
+    if (!row.documentId) {
+      continue;
+    }
+
+    documentIds.add(row.documentId);
+    const documentRows = rowsByDocumentId.get(row.documentId) ?? [];
+    documentRows.push(row);
+    rowsByDocumentId.set(row.documentId, documentRows);
+
+    const stockNumber = row.stockNumber?.trim();
+    if (stockNumber) {
+      const stockNumbers = stockNumbersByDocumentId.get(row.documentId) ?? new Set<string>();
+      stockNumbers.add(stockNumber);
+      stockNumbersByDocumentId.set(row.documentId, stockNumbers);
+    }
+  }
+
+  return { documentIds, stockNumbersByDocumentId, rowsByDocumentId };
+}
+
+function rawDocumentId(doc: RawDoc): string {
+  return String(doc._id ?? fmtDate(doc.createdAt) ?? fmtDate(doc.updatedAt) ?? "unknown");
+}
+
+function purchaseDocumentId(doc: RawDoc, source: "warehouse" | "loose" | "order" | "memo"): string {
+  const id = rawDocumentId(doc);
+  if (source === "warehouse") return `warehouse-purchase:${id}`;
+  if (source === "loose") return `loose-purchase:${id}`;
+  if (source === "memo") return `memo:${id}`;
+  return `order-purchase:${id}`;
+}
+
+function productStockIdentifier(product: RawDoc): string | null {
+  const value = product.Stock_No ?? product.Certificate_No ?? product.lotid ?? product.item_no;
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function matchesExportDocument(index: ExportFilterIndex, documentId: string): boolean {
+  return index.documentIds.has(documentId);
+}
+
+function matchesExportProduct(index: ExportFilterIndex, documentId: string, product: RawDoc): boolean {
+  if (!matchesExportDocument(index, documentId)) {
+    return false;
+  }
+
+  const allowedStockNumbers = index.stockNumbersByDocumentId.get(documentId);
+  if (!allowedStockNumbers || allowedStockNumbers.size === 0) {
+    return true;
+  }
+
+  const stockNumber = productStockIdentifier(product);
+  return stockNumber ? allowedStockNumbers.has(stockNumber) : true;
+}
+
+function analyticsPurchaseValueForProduct(
+  index: ExportFilterIndex,
+  documentId: string,
+  product: RawDoc
+): number | null {
+  const stockNumber = productStockIdentifier(product);
+  if (!stockNumber) {
+    return null;
+  }
+
+  const matches = (index.rowsByDocumentId.get(documentId) ?? []).filter((row) => row.stockNumber === stockNumber);
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return matches.reduce((sum, row) => sum + num(row.purchaseValue), 0);
 }
 
 // Effective vendor price per carat, in priority order:
@@ -98,6 +301,90 @@ interface VendorGroup {
   pcs: number;
 }
 
+interface ExchangeRateRecord {
+  amount?: number;
+  createdAt?: Date | string;
+}
+
+interface ExchangeRateResolution {
+  rate: number;
+  source: string;
+}
+
+type ExchangeRateResolver = (date: unknown) => ExchangeRateResolution;
+
+function exchangeRateDate(value: unknown): number {
+  return toDate(value)?.getTime() ?? 0;
+}
+
+function buildExchangeRateResolver(records: ExchangeRateRecord[]): ExchangeRateResolver {
+  const rates = records
+    .map((record) => ({
+      rate: num(record.amount),
+      time: exchangeRateDate(record.createdAt)
+    }))
+    .filter((record) => record.rate > 0 && record.time > 0)
+    .sort((left, right) => left.time - right.time);
+
+  return (dateValue: unknown) => {
+    const targetTime = exchangeRateDate(dateValue);
+    if (!targetTime || rates.length === 0) {
+      return { rate: 1, source: "missing/default" };
+    }
+
+    let selected: { rate: number; time: number } | null = null;
+    for (const rate of rates) {
+      if (rate.time > targetTime) {
+        break;
+      }
+      selected = rate;
+    }
+
+    return selected
+      ? { rate: selected.rate, source: "exchange_rates_master.amount" }
+      : { rate: 1, source: "missing/default" };
+  };
+}
+
+function resolvePurchaseExchangeRate(
+  doc: RawDoc,
+  invoice: RawDoc | undefined,
+  fallbackResolver: ExchangeRateResolver
+): ExchangeRateResolution {
+  const docRate = num(doc.exchange_rate);
+  if (docRate > 0) {
+    return { rate: docRate, source: "doc.exchange_rate" };
+  }
+
+  const costRate = num(doc.cost?.exchange_rate);
+  if (costRate > 0) {
+    return { rate: costRate, source: "doc.cost.exchange_rate" };
+  }
+
+  const invoiceRate = num(invoice?.exchange_rate);
+  if (invoiceRate > 0) {
+    return { rate: invoiceRate, source: "invoice.exchange_rate" };
+  }
+
+  return fallbackResolver(invoice?.date ?? doc.createdAt ?? doc.updatedAt);
+}
+
+function purchaseMoney(
+  netUsd: number,
+  taxRate: number,
+  exchangeRate: number
+): { netUsd: number; grossUsd: number; netInr: number; grossInr: number } {
+  const roundedNetUsd = round(netUsd);
+  const grossUsd = round(roundedNetUsd * (1 + taxRate));
+
+  return {
+    netUsd: roundedNetUsd,
+    grossUsd,
+    netInr: round(roundedNetUsd * exchangeRate),
+    grossInr: round(grossUsd * exchangeRate)
+  };
+}
+
 /**
  * One purchase row per (document × vendor) — POs and invoices are keyed by vendorID, and PARTY
  * is the vendor. Works for warehouse/loose procurement and for the vendor PO raised on a sales order.
@@ -106,9 +393,10 @@ function buildRowsForDoc(
   doc: RawDoc,
   source: string,
   getVendor: (id: string) => { name: string; country: string },
-  productFilter?: (product: RawDoc) => boolean
+  resolveFallbackExchangeRate: ExchangeRateResolver,
+  productFilter?: (product: RawDoc) => boolean,
+  productPurchaseValue?: (product: RawDoc) => number | null
 ): RawDoc[] {
-  const exchangeRate = num(doc.exchange_rate) || num(doc.cost?.exchange_rate) || 1;
   const vatDeclarationGiven = hasVatDeclaration(doc);
   const invoiceList = asArray(doc.invoice);
   // Loose-lots purchase stores a single invoice object (one vendor) instead of an array.
@@ -124,7 +412,7 @@ function buildRowsForDoc(
     const carat = num(product.Carat ?? product.total_carat);
     const group = groups.get(vendorId) ?? { carat: 0, netUsd: 0, pcs: 0 };
     group.carat += carat;
-    group.netUsd += purchaseUnitPrice(product) * carat;
+    group.netUsd += productPurchaseValue?.(product) ?? purchaseUnitPrice(product) * carat;
     group.pcs += num(product.number_of_stone ?? product.Pcs ?? product.qty ?? 1);
     groups.set(vendorId, group);
   }
@@ -133,8 +421,12 @@ function buildRowsForDoc(
     // Invoice number + date come only from the invoice the vendor uploaded (blank until uploaded).
     const invoice = invoiceList.find((entry) => String(entry.vendorID) === vendorId) ?? singleInvoice ?? undefined;
     const vendor = getVendor(vendorId);
-    const netInr = round(group.netUsd * exchangeRate);
-    const grossInr = round(netInr * (1 + purchaseTaxRate(vendor.country, vatDeclarationGiven)));
+    const exchangeRate = resolvePurchaseExchangeRate(doc, invoice, resolveFallbackExchangeRate);
+    const money = purchaseMoney(
+      group.netUsd,
+      purchaseTaxRate(vendor.country, vatDeclarationGiven),
+      exchangeRate.rate
+    );
     // Payment terms (net days) drive the due date; loose lots keep terms on the doc itself.
     const terms = num(invoice?.terms) || num(doc.terms);
     // A payment is real only once the vendor invoice is marked "Payment Done" (sets utr_no). No paid-on
@@ -149,8 +441,12 @@ function buildRowsForDoc(
       Status: String(invoice?.status ?? ""),
       Terms: terms || "",
       "Total carat": round(group.carat),
-      "Net (Rs)": netInr,
-      "GROSS(Rs)": grossInr, // Net + GST/VAT derived from the vendor's location
+      "Net ($)": money.netUsd,
+      "GROSS($)": money.grossUsd,
+      "Exchange Rate": exchangeRate.rate,
+      "Exchange Rate Source": exchangeRate.source,
+      "Net (Rs)": money.netInr,
+      "GROSS(Rs)": money.grossInr, // Net + GST/VAT derived from the vendor's location
       Month: monthLabel(doc.createdAt),
       "Payment Date": paid ? addDays(invoice?.date, terms) : "",
       "Payment reference (UTR)": invoice?.utr_no ?? "",
@@ -159,7 +455,7 @@ function buildRowsForDoc(
   });
 }
 
-async function buildPurchaseRows(): Promise<RawDoc[]> {
+async function buildPurchaseRows(index: ExportFilterIndex): Promise<RawDoc[]> {
   const db = await getSourceDb();
 
   const vendors = (await db
@@ -176,6 +472,11 @@ async function buildPurchaseRows(): Promise<RawDoc[]> {
     ])
   );
   const getVendor = (id: string) => vendorMap.get(id) ?? { name: "", country: "" };
+  const exchangeRates = (await db
+    .collection<ExchangeRateRecord>("exchange_rates_master")
+    .find({}, { projection: { amount: 1, createdAt: 1 } })
+    .toArray()) as ExchangeRateRecord[];
+  const resolveFallbackExchangeRate = buildExchangeRateResolver(exchangeRates);
 
   // PO raised to a vendor: array form (order/warehouse) or non-empty string (loose).
   const hasPo = {
@@ -192,15 +493,67 @@ async function buildPurchaseRows(): Promise<RawDoc[]> {
   ]);
 
   const rows: RawDoc[] = [];
-  for (const doc of warehouse as RawDoc[]) rows.push(...buildRowsForDoc(doc, "Warehouse Purchase", getVendor));
-  for (const doc of loose as RawDoc[]) rows.push(...buildRowsForDoc(doc, "Loose Lots Purchase", getVendor));
+  for (const doc of warehouse as RawDoc[]) {
+    const documentId = purchaseDocumentId(doc, "warehouse");
+    if (matchesExportDocument(index, documentId)) {
+      rows.push(
+        ...buildRowsForDoc(
+          doc,
+          "Warehouse Purchase",
+          getVendor,
+          resolveFallbackExchangeRate,
+          (product) => matchesExportProduct(index, documentId, product),
+          (product) => analyticsPurchaseValueForProduct(index, documentId, product)
+        )
+      );
+    }
+  }
+  for (const doc of loose as RawDoc[]) {
+    const documentId = purchaseDocumentId(doc, "loose");
+    if (matchesExportDocument(index, documentId)) {
+      rows.push(
+        ...buildRowsForDoc(
+          doc,
+          "Loose Lots Purchase",
+          getVendor,
+          resolveFallbackExchangeRate,
+          (product) => matchesExportProduct(index, documentId, product),
+          (product) => analyticsPurchaseValueForProduct(index, documentId, product)
+        )
+      );
+    }
+  }
   for (const doc of [...orders, ...looseOrders, ...ownShapeOrders] as RawDoc[]) {
-    rows.push(...buildRowsForDoc(doc, "Order PO", getVendor));
+    const documentId = purchaseDocumentId(doc, "order");
+    if (matchesExportDocument(index, documentId)) {
+      rows.push(
+        ...buildRowsForDoc(
+          doc,
+          "Order PO",
+          getVendor,
+          resolveFallbackExchangeRate,
+          (product) => matchesExportProduct(index, documentId, product),
+          (product) => analyticsPurchaseValueForProduct(index, documentId, product)
+        )
+      );
+    }
   }
   // Converted memos: count only the products that have actually converted (is_order === true),
   // so a partially-converted memo contributes only its converted stones.
   for (const doc of memos as RawDoc[]) {
-    rows.push(...buildRowsForDoc(doc, "Converted Memo", getVendor, (product) => product.is_order === true));
+    const documentId = purchaseDocumentId(doc, "memo");
+    if (matchesExportDocument(index, documentId)) {
+      rows.push(
+        ...buildRowsForDoc(
+          doc,
+          "Converted Memo",
+          getVendor,
+          resolveFallbackExchangeRate,
+          (product) => product.is_order === true && matchesExportProduct(index, documentId, product),
+          (product) => analyticsPurchaseValueForProduct(index, documentId, product)
+        )
+      );
+    }
   }
 
   return rows;
@@ -238,7 +591,33 @@ const INVOICE_FIELDS = [
   "invoice_usa_loc"
 ];
 
-type SalesSource = "order" | "loose" | "own_shape";
+type SalesSource = "order" | "loose_master" | "loose" | "own_shape";
+
+function salesDocumentId(doc: RawDoc, source: SalesSource): string {
+  const id = rawDocumentId(doc);
+  if (source === "loose_master") return `loose-master:${id}`;
+  if (source === "loose") return `loose-order:${id}`;
+  if (source === "own_shape") return `own-shape-order:${id}`;
+  return `order:${id}`;
+}
+
+interface SalesSourceConfig {
+  collection: string;
+  documentPrefix: string;
+  source: SalesSource;
+}
+
+interface SalesSourceDocument {
+  doc: RawDoc;
+  source: SalesSource;
+}
+
+const SALES_SOURCE_CONFIGS: SalesSourceConfig[] = [
+  { collection: "order_master", documentPrefix: "order", source: "order" },
+  { collection: "loose_lots_master", documentPrefix: "loose-master", source: "loose_master" },
+  { collection: "loose_lots_order_master", documentPrefix: "loose-order", source: "loose" },
+  { collection: "own_shape_order_master", documentPrefix: "own-shape-order", source: "own_shape" }
+];
 
 function pickInvoice(doc: RawDoc): string {
   for (const field of INVOICE_FIELDS) {
@@ -260,7 +639,7 @@ const BUYER_SHIP_STATUS = /order shipped|order delivered|out for delivery/i;
 const INTERNAL_MOVE_STATUS = /ldspl to/i;
 
 function salesOrderType(doc: RawDoc, source: SalesSource): string {
-  if (source === "loose") return "loose lot";
+  if (source === "loose" || source === "loose_master") return "loose lot";
   if (source === "own_shape") return "own shape";
   if (doc.combine?.is_memo === true) return "memo";
   if (doc.combine?.is_combine === true) return "combine";
@@ -269,6 +648,7 @@ function salesOrderType(doc: RawDoc, source: SalesSource): string {
 }
 
 function salesItems(doc: RawDoc, source: SalesSource): RawDoc[] {
+  if (source === "loose_master") return asArray(doc.entries);
   if (source === "loose" || source === "own_shape") return asArray(doc.stocks);
   const products = asArray(doc.products);
   return products.length > 0 ? products : asArray(doc.combine_products);
@@ -361,13 +741,20 @@ function buildSalesRowsForDoc(
   doc: RawDoc,
   source: SalesSource,
   buyerName: (id: unknown) => string,
-  combineChildren: Map<string, string[]>
+  combineChildren: Map<string, string[]>,
+  itemFilter?: (item: RawDoc) => boolean
 ): SalesResult[] {
+  const items = salesItems(doc, source);
+  const selectedItems = itemFilter ? items.filter(itemFilter) : items;
+  if (selectedItems.length === 0) {
+    return [];
+  }
+
   let pcs = 0;
   let carat = 0;
   let transferRaw = 0;
   let saleRaw = 0;
-  for (const item of salesItems(doc, source)) {
+  for (const item of selectedItems) {
     const itemCarat = num(item.Carat ?? item.available_carats ?? item.total_carat);
     pcs += num(item.qty ?? item.Pcs ?? item.available_pcs ?? item.number_of_stone) || 1;
     carat += itemCarat;
@@ -380,7 +767,7 @@ function buildSalesRowsForDoc(
   const transferValue = round(transferRaw); // warehouse (internal) invoice value = Σ transfer_price × Carat
   // Buyer invoice value = order sale total; converted memos leave cost.total at 0, so fall back to the
   // same per-line computation the order controller uses (Σ round(round(price*qty)*carat)).
-  const saleTotal = round(num(doc.cost?.total)) || round(saleRaw);
+  const saleTotal = selectedItems.length === items.length ? round(num(doc.cost?.total)) || round(saleRaw) : round(saleRaw);
 
   const orderType = salesOrderType(doc, source);
   const actualBuyer = buyerName(doc.user_id ?? doc.buyer_id);
@@ -468,7 +855,277 @@ function buildSalesRowsForDoc(
   return results;
 }
 
-async function buildSalesRows(scope: ResolvedScope): Promise<SalesResult[]> {
+function splitSalesDocumentId(documentId: string) {
+  const separatorIndex = documentId.indexOf(":");
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const prefix = documentId.slice(0, separatorIndex);
+  const rawId = documentId.slice(separatorIndex + 1);
+  const config = SALES_SOURCE_CONFIGS.find((entry) => entry.documentPrefix === prefix);
+  return config && rawId ? { ...config, rawId } : null;
+}
+
+function mongoIdValue(rawId: string) {
+  return new ObjectId(rawId);
+}
+
+function firstAnalyticsRow(rows: ExportAnalyticsRow[]): ExportAnalyticsRow | undefined {
+  return rows[0];
+}
+
+function analyticsQuantity(rows: ExportAnalyticsRow[]) {
+  return rows.reduce((sum, row) => sum + num(row.quantity), 0);
+}
+
+function itemCarat(item: RawDoc) {
+  return num(item.Carat ?? item.available_carats ?? item.total_carat);
+}
+
+function itemQuantity(item: RawDoc) {
+  return num(item.qty ?? item.Pcs ?? item.available_pcs ?? item.number_of_stone) || 1;
+}
+
+function sourceDocumentStats(doc: RawDoc, source: SalesSource) {
+  return itemStats(salesItems(doc, source));
+}
+
+function itemStats(items: RawDoc[]) {
+  return items.reduce(
+    (stats, item) => ({
+      pcs: stats.pcs + itemQuantity(item),
+      carat: stats.carat + itemCarat(item)
+    }),
+    { pcs: 0, carat: 0 }
+  );
+}
+
+function analyticsDate(rows: ExportAnalyticsRow[]) {
+  const row = firstAnalyticsRow(rows);
+  if (row?.date) {
+    return row.date;
+  }
+  return row?.orderDate ? fmtDate(row.orderDate) : "";
+}
+
+function analyticsBuyerName(rows: ExportAnalyticsRow[]) {
+  return rows.map((row) => row.buyer?.name?.trim()).find((name): name is string => Boolean(name)) ?? "";
+}
+
+function fallbackOrderType(rows: ExportAnalyticsRow[]) {
+  const productType = firstAnalyticsRow(rows)?.productType;
+  if (productType === "loose_lot") {
+    return "loose lot";
+  }
+  if (productType === "own_shape") {
+    return "own shape";
+  }
+  return "normal";
+}
+
+function buildDashboardSalesRow(
+  documentId: string,
+  totalValue: number,
+  sourceDocument: SalesSourceDocument | undefined,
+  analyticsRows: ExportAnalyticsRow[],
+  buyerName: (id: unknown) => string
+): RawDoc {
+  const doc = sourceDocument?.doc;
+  const source = sourceDocument?.source;
+  const sourceStats = doc && source ? sourceDocumentStats(doc, source) : null;
+  const buyerLabel = doc
+    ? buyerName(doc.user_id ?? doc.buyer_id) || analyticsBuyerName(analyticsRows)
+    : analyticsBuyerName(analyticsRows);
+
+  return {
+    Date: doc ? fmtDate(doc.createdAt) : analyticsDate(analyticsRows),
+    "Order Number": doc?.order_number ?? documentId,
+    "Invoice Number": doc ? pickInvoice(doc) : "",
+    "Invoice Date": doc ? statusDate(doc, BUYER_SHIP_STATUS) : "",
+    "Buyer Name": buyerLabel,
+    "Order Type": doc && source ? salesOrderType(doc, source) : fallbackOrderType(analyticsRows),
+    Terms: num(doc?.terms) || "",
+    Pcs: sourceStats ? sourceStats.pcs : analyticsQuantity(analyticsRows),
+    "Total Carat": sourceStats ? round(sourceStats.carat) : 0,
+    "Total($)": totalValue,
+    "Date of receipt": doc ? deliveredDate(doc) : "",
+    Ref: doc?.ref ?? ""
+  };
+}
+
+function itemStockCandidates(item: RawDoc): string[] {
+  return [
+    item.Stock_No,
+    item.stockNumber,
+    item.stock_no,
+    item.Certificate_No,
+    item.lotid,
+    item.item_no,
+    item._id
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+}
+
+function selectedSalesItems(doc: RawDoc, source: SalesSource, selectedStockNumbers?: Set<string>): RawDoc[] {
+  const items = salesItems(doc, source);
+  if (!selectedStockNumbers?.size) {
+    return items;
+  }
+
+  const selected = new Set([...selectedStockNumbers].map((value) => String(value).trim()).filter(Boolean));
+  const matchedItems = items.filter((item) => itemStockCandidates(item).some((candidate) => selected.has(candidate)));
+  return matchedItems.length > 0 ? matchedItems : items;
+}
+
+function itemSalesValue(item: RawDoc): number {
+  const carat = itemCarat(item);
+  const pricePerCarat = num(item.Price) || num(item.Price_Per_Carat) || num(item.price_per_carat) || num(item.DiscountPrice);
+  const quantity = num(item.qty) || 1;
+  return num(item.total) || round(round(pricePerCarat * quantity) * carat);
+}
+
+function internalTransferValue(doc: RawDoc, items: RawDoc[]): number {
+  const transferValue = round(
+    items.reduce((sum, item) => sum + num(item.transfer_price) * itemCarat(item), 0)
+  );
+  if (transferValue > 0) {
+    return transferValue;
+  }
+
+  const costTotal = round(num(doc.cost?.total));
+  if (costTotal > 0) {
+    return costTotal;
+  }
+
+  return round(items.reduce((sum, item) => sum + itemSalesValue(item), 0));
+}
+
+function internalTransferLeg(doc: RawDoc): { invoice: string; label: string; destination: string } | null {
+  const invoice = String(doc.invoice_ind_exp ?? "").trim();
+  if (!invoice) {
+    return null;
+  }
+
+  const onwardWarehouse = doc.invoice_dub_exp
+    ? "LDD"
+    : doc.invoice_dub_ldexp
+    ? "LD"
+    : doc.invoice_dub_loexp
+    ? "LO"
+    : doc.invoice_usa_exp
+    ? "US"
+    : "";
+  if (onwardWarehouse) {
+    return { invoice, label: `LDSPL>${onwardWarehouse}`, destination: onwardWarehouse };
+  }
+
+  const statuses = asArray(doc.status_list).map((entry) => String(entry?.order_status ?? ""));
+  const ldsplWarehouse = (statuses.find((status) => INTERNAL_MOVE_STATUS.test(status))?.match(/ldspl to (\w+)/i)?.[1] ?? "").toUpperCase();
+  if (ldsplWarehouse) {
+    return { invoice, label: `LDSPL>${ldsplWarehouse}`, destination: ldsplWarehouse };
+  }
+
+  if (isInternalTransfer(doc)) {
+    const from = String(doc.combine?.from ?? "").toUpperCase();
+    const to = String(doc.combine?.to ?? "").toUpperCase();
+    return { invoice, label: `${from}>${to}`, destination: to };
+  }
+
+  return null;
+}
+
+function buildInternalTransferRow(
+  sourceDocument: SalesSourceDocument,
+  selectedStockNumbers?: Set<string>
+): SalesResult | null {
+  const { doc, source } = sourceDocument;
+  const leg = internalTransferLeg(doc);
+  if (!leg) {
+    return null;
+  }
+
+  const items = selectedSalesItems(doc, source, selectedStockNumbers);
+  if (items.length === 0) {
+    return null;
+  }
+
+  const stats = itemStats(items);
+  return {
+    sheet: "Internal Transfer",
+    buyerSourceId: String(doc.user_id ?? doc.buyer_id ?? ""),
+    warehouseDest: leg.destination,
+    row: {
+      Date: fmtDate(doc.createdAt),
+      "Order Number": doc.order_number ?? "",
+      "Invoice Number": leg.invoice,
+      "Invoice Date": statusDate(doc, INTERNAL_MOVE_STATUS),
+      "Buyer Name": leg.label,
+      "Order Type": salesOrderType(doc, source),
+      Terms: num(doc.terms ?? doc.payment_terms) || "",
+      Pcs: stats.pcs,
+      "Total Carat": round(stats.carat),
+      "Total($)": internalTransferValue(doc, items),
+      "Date of receipt": deliveredDate(doc),
+      Ref: doc.ref ?? ""
+    }
+  };
+}
+
+async function loadSalesSourceDocuments(documentIds: Set<string>): Promise<Map<string, SalesSourceDocument>> {
+  const db = await getSourceDb();
+  const idsByConfig = new Map<SalesSourceConfig, string[]>();
+
+  for (const documentId of documentIds) {
+    const parsed = splitSalesDocumentId(documentId);
+    if (!parsed) {
+      continue;
+    }
+
+    const config = SALES_SOURCE_CONFIGS.find((entry) => entry.documentPrefix === parsed.documentPrefix);
+    if (!config) {
+      continue;
+    }
+
+    const ids = idsByConfig.get(config) ?? [];
+    ids.push(parsed.rawId);
+    idsByConfig.set(config, ids);
+  }
+
+  const sourceDocuments = new Map<string, SalesSourceDocument>();
+  await Promise.all(
+    [...idsByConfig.entries()].map(async ([config, rawIds]) => {
+      const objectIds = rawIds.filter((rawId) => ObjectId.isValid(rawId)).map(mongoIdValue);
+      if (objectIds.length === 0) {
+        return;
+      }
+
+      const docs = await db
+        .collection(config.collection)
+        .find({ _id: { $in: objectIds } })
+        .toArray();
+
+      for (const doc of docs as RawDoc[]) {
+        sourceDocuments.set(salesDocumentId(doc, config.source), { doc, source: config.source });
+      }
+    })
+  );
+
+  return sourceDocuments;
+}
+
+async function loadSalesDocumentTotals(documentIds: Set<string>): Promise<Map<string, number>> {
+  const db = await getMongoDb();
+  const documents = await db
+    .collection<ExportSalesDocument>("analytics_sales_documents")
+    .find({ documentId: { $in: [...documentIds] } }, { projection: { documentId: 1, totalValue: 1 } })
+    .toArray();
+
+  return new Map(documents.map((document) => [document.documentId, num(document.totalValue)]));
+}
+
+async function buildSalesRows(index: ExportFilterIndex): Promise<SalesResult[]> {
   const db = await getSourceDb();
 
   const buyers = (await db
@@ -476,115 +1133,73 @@ async function buildSalesRows(scope: ResolvedScope): Promise<SalesResult[]> {
     .find({}, { projection: { company_name: 1, firstname: 1, lastname: 1, user_id: 1 } })
     .toArray()) as RawDoc[];
   const buyerMap = new Map<string, string>();
-  // Normalize any buyer reference (user_master id or buyer id) -> the canonical buyer_master _id used as sourceBuyerId.
-  const canonicalBuyerId = new Map<string, string>();
   for (const buyer of buyers) {
     const name = String(buyer.company_name ?? `${buyer.firstname ?? ""} ${buyer.lastname ?? ""}`.trim());
     buyerMap.set(String(buyer._id), name);
-    canonicalBuyerId.set(String(buyer._id), String(buyer._id));
     if (buyer.user_id) {
       buyerMap.set(String(buyer.user_id), name);
-      canonicalBuyerId.set(String(buyer.user_id), String(buyer._id));
     }
   }
   const buyerName = (id: unknown) => buyerMap.get(String(id)) ?? "";
 
-  // Sub-admin scoping: resolve the analytics buyer/warehouse keys to source ids. "ALL" => no restriction.
-  const warehouseDocs = (await db.collection("warehouse_master").find({}).toArray()) as RawDoc[];
-  const resolveWarehouseSourceId = buildWarehouseResolver(warehouseDocs);
-  let allowedBuyerSourceIds: Set<string> | null = null;
-  let allowedWarehouseSourceIds: Set<string> | null = null;
-  if (scope.buyerKeys !== "ALL" || scope.warehouseKeys !== "ALL") {
-    const analytics = await getMongoDb();
-    if (scope.buyerKeys !== "ALL") {
-      const rows = await analytics
-        .collection("analytics_buyers")
-        .find({ key: { $in: scope.buyerKeys } }, { projection: { sourceBuyerId: 1 } })
-        .toArray();
-      allowedBuyerSourceIds = new Set(rows.map((row) => String(row.sourceBuyerId)).filter(Boolean));
-    }
-    if (scope.warehouseKeys !== "ALL") {
-      const rows = await analytics
-        .collection("analytics_warehouses")
-        .find({ key: { $in: scope.warehouseKeys } }, { projection: { sourceWarehouseId: 1 } })
-        .toArray();
-      allowedWarehouseSourceIds = new Set(rows.map((row) => String(row.sourceWarehouseId)).filter(Boolean));
-    }
-  }
-  const isVisible = (result: SalesResult): boolean => {
-    if (result.sheet === "Sales to Buyer") {
-      if (!allowedBuyerSourceIds) {
-        return true;
-      }
-      const id = canonicalBuyerId.get(result.buyerSourceId) ?? result.buyerSourceId;
-      return allowedBuyerSourceIds.has(id);
-    }
-    if (!allowedWarehouseSourceIds) {
-      return true;
-    }
-    const warehouseId = resolveWarehouseSourceId(result.warehouseDest);
-    return warehouseId !== null && allowedWarehouseSourceIds.has(warehouseId);
-  };
-
-  const hasInvoice = { $or: INVOICE_FIELDS.map((field) => ({ [field]: { $ne: "" } })) };
-
-  const [orders, looseOrders, ownShapeOrders] = await Promise.all([
-    db.collection("order_master").find(hasInvoice).toArray(),
-    db.collection("loose_lots_order_master").find(hasInvoice).toArray(),
-    db.collection("own_shape_order_master").find(hasInvoice).toArray()
+  const [sourceDocuments, documentTotals] = await Promise.all([
+    loadSalesSourceDocuments(index.documentIds),
+    loadSalesDocumentTotals(index.documentIds)
   ]);
 
-  // Reverse index: combine order_number -> the order_numbers of the originals combined into it.
-  const combineChildren = new Map<string, string[]>();
-  for (const docs of [orders, looseOrders, ownShapeOrders] as RawDoc[][]) {
-    for (const doc of docs) {
-      for (const activity of asArray(doc.combine_activity)) {
-        const ref = String(activity.ref ?? "").trim();
-        if (ref) {
-          const list = combineChildren.get(ref) ?? [];
-          list.push(String(doc.order_number ?? ""));
-          combineChildren.set(ref, list);
-        }
-      }
-    }
-  }
+  return [...index.documentIds]
+    .sort((left, right) => {
+      const leftRows = index.rowsByDocumentId.get(left) ?? [];
+      const rightRows = index.rowsByDocumentId.get(right) ?? [];
+      return analyticsDate(leftRows).localeCompare(analyticsDate(rightRows)) || left.localeCompare(right);
+    })
+    .map((documentId) => ({
+      sheet: "Sales to Buyer" as const,
+      buyerSourceId: "",
+      warehouseDest: "",
+      row: buildDashboardSalesRow(
+        documentId,
+        documentTotals.get(documentId) ?? 0,
+        sourceDocuments.get(documentId),
+        index.rowsByDocumentId.get(documentId) ?? [],
+        buyerName
+      )
+    }));
 
-  const results: SalesResult[] = [];
-  const sources: Array<[RawDoc[], SalesSource]> = [
-    [orders as RawDoc[], "order"],
-    [looseOrders as RawDoc[], "loose"],
-    [ownShapeOrders as RawDoc[], "own_shape"]
-  ];
-  for (const [docs, source] of sources) {
-    for (const doc of docs) {
-      // Show the combine itself (is_combine:true = the consolidated x+y order). Hide the original
-      // orders that were combined into a combine (they carry combine_activity) — the combine
-      // represents them under one invoice, so they must not also appear separately.
-      if (asArray(doc.combine_activity).length > 0 && doc.combine?.is_combine !== true) {
-        continue;
-      }
-      // Skip canceled orders and anything without a real (non-empty) invoice number.
-      if (isCanceled(doc) || !pickInvoice(doc)) {
-        continue;
-      }
-      results.push(...buildSalesRowsForDoc(doc, source, buyerName, combineChildren).filter(isVisible));
-    }
-  }
-  return results;
+}
+
+async function buildInternalTransferRows(index: ExportFilterIndex): Promise<SalesResult[]> {
+  const sourceDocuments = await loadSalesSourceDocuments(index.documentIds);
+  return [...index.documentIds]
+    .sort((left, right) => {
+      const leftRows = index.rowsByDocumentId.get(left) ?? [];
+      const rightRows = index.rowsByDocumentId.get(right) ?? [];
+      return analyticsDate(leftRows).localeCompare(analyticsDate(rightRows)) || left.localeCompare(right);
+    })
+    .map((documentId) => {
+      const sourceDocument = sourceDocuments.get(documentId);
+      return sourceDocument
+        ? buildInternalTransferRow(sourceDocument, index.stockNumbersByDocumentId.get(documentId))
+        : null;
+    })
+    .filter((row): row is SalesResult => Boolean(row));
 }
 
 export class ExportsService {
-  async buildPurchaseWorkbook(): Promise<Buffer> {
-    const rows = await buildPurchaseRows();
+  async buildPurchaseWorkbook(scope: ResolvedScope, filters: DashboardFiltersInput): Promise<Buffer> {
+    const index = await buildExportFilterIndex(scope, filters, ["purchase", "memo"]);
+    const rows = await buildPurchaseRows(index);
     return writeXlsxFile([
       { sheet: "Purchase", data: sheetData(PURCHASE_COLUMNS, rows) }
     ]).toBuffer();
   }
 
-  async buildSalesWorkbook(scope: ResolvedScope): Promise<Buffer> {
-    const results = await buildSalesRows(scope);
+  async buildSalesWorkbook(scope: ResolvedScope, filters: DashboardFiltersInput): Promise<Buffer> {
+    const index = await buildExportFilterIndex(scope, filters, ["sales"]);
+    const results = await buildSalesRows(index);
+    const transferResults = await buildInternalTransferRows(index);
     const toBuyer = results.filter((result) => result.sheet === "Sales to Buyer").map((result) => result.row);
-    const transfers = results.filter((result) => result.sheet === "Internal Transfer").map((result) => result.row);
+    const transfers = transferResults.map((result) => result.row);
 
     return writeXlsxFile([
       { sheet: "Sales to Buyer", data: sheetData(SALES_COLUMNS, toBuyer) },

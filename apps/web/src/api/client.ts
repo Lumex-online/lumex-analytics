@@ -154,15 +154,60 @@ async function downloadFile(path: string, filename: string, hasRetried = false) 
   URL.revokeObjectURL(url);
 }
 
+function appendNumberList(params: URLSearchParams, key: string, values?: number[]) {
+  if (values && values.length > 0) {
+    params.set(key, values.join(","));
+  }
+}
+
+function appendString(params: URLSearchParams, key: string, value?: string) {
+  const trimmed = value?.trim();
+  if (trimmed) {
+    params.set(key, trimmed);
+  }
+}
+
+function buildExportQuery(filters: DashboardFiltersInput) {
+  const params = new URLSearchParams();
+  appendString(params, "dateFrom", filters.dateRange?.from);
+  appendString(params, "dateTo", filters.dateRange?.to);
+  appendNumberList(params, "warehouseKeys", filters.warehouseKeys);
+  appendNumberList(params, "buyerKeys", filters.buyerKeys);
+  appendNumberList(params, "subAdminKeys", filters.subAdminKeys);
+  appendNumberList(params, "vendorKeys", filters.vendorKeys);
+  appendNumberList(params, "skuKeys", filters.skuKeys);
+  appendString(params, "shape", filters.shape);
+  appendString(params, "size", filters.size);
+  appendString(params, "color", filters.color);
+  appendString(params, "clarity", filters.clarity);
+  appendString(params, "productType", filters.productType);
+  appendString(params, "status", filters.status);
+  appendString(params, "viewMode", filters.viewMode);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function exportFilename(prefix: string, filters: DashboardFiltersInput) {
+  const from = filters.dateRange?.from?.trim();
+  const to = filters.dateRange?.to?.trim();
+  return from && to ? `${prefix}-${from}-to-${to}.xlsx` : `${prefix}.xlsx`;
+}
+
 export const apiClient = {
   getMyPermissions() {
     return request<PermissionMetadataResponse>("/me/permissions");
   },
-  downloadPurchaseWorkbook() {
-    return downloadFile("/exports/purchase", "purchase-online.xlsx");
+  downloadPurchaseWorkbook(filters: DashboardFiltersInput) {
+    return downloadFile(
+      `/exports/purchase${buildExportQuery(filters)}`,
+      exportFilename("purchase-online", filters)
+    );
   },
-  downloadSalesWorkbook() {
-    return downloadFile("/exports/sales", "sales-online.xlsx");
+  downloadSalesWorkbook(filters: DashboardFiltersInput) {
+    return downloadFile(
+      `/exports/sales${buildExportQuery(filters)}`,
+      exportFilename("sales-online", filters)
+    );
   },
   getFilters(dashboardKey: DashboardKey) {
     return request<DashboardFiltersMetadata>(`/metadata/filters?dashboardKey=${dashboardKey}`);

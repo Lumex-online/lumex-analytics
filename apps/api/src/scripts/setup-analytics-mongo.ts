@@ -164,6 +164,8 @@ async function ensureIndexes(): Promise<void> {
     { key: { productKey: 1 } },
     { key: { subAdminKeys: 1 } },
     { key: { sourceType: 1, orderDate: -1 } },
+    { key: { sourceType: 1, orderDate: -1, warehouseKey: 1, buyerKey: 1, vendorKey: 1 } },
+    { key: { sourceType: 1, subAdminKeys: 1, orderDate: -1 } },
     { key: { warehouseKey: 1, buyerKey: 1, productKey: 1 } },
     { key: { stockNumber: 1 } }
   ]);

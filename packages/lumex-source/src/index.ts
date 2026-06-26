@@ -784,12 +784,18 @@ function normalizeOrderStatus(value: unknown) {
     : "";
 }
 
-function hasCanceledStatus(statusList: unknown) {
+function hasOrderStatus(statusList: unknown, statuses: readonly string[]) {
+  const expected = new Set(statuses.map((status) => normalizeOrderStatus(status)));
+
   return ensureArray(statusList).some((entry) => {
     const row = entry as RawDocument;
     const status = normalizeOrderStatus(row.order_status ?? row.status ?? row.name ?? entry);
-    return status === "order canceled" || status === "order cancelled";
+    return expected.has(status);
   });
+}
+
+function hasCanceledStatus(statusList: unknown) {
+  return hasOrderStatus(statusList, ["order canceled", "order cancelled"]);
 }
 
 // Statuses that count an order as a realized sale (shipped/delivered to the buyer).
@@ -804,11 +810,7 @@ const FULFILLED_ORDER_STATUSES = new Set([
 // For combined orders this reads the combined order_master's own status_list, which is the
 // source of truth for the goods' fulfilment.
 function reachedShippedOrDelivered(statusList: unknown) {
-  return ensureArray(statusList).some((entry) => {
-    const row = entry as RawDocument;
-    const status = normalizeOrderStatus(row.order_status ?? row.status ?? row.name ?? entry);
-    return FULFILLED_ORDER_STATUSES.has(status);
-  });
+  return hasOrderStatus(statusList, [...FULFILLED_ORDER_STATUSES]);
 }
 
 function stockLookupCandidates(value: RawDocument) {
@@ -1388,16 +1390,20 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
   const orderWarehouseKeyByStockRef = new Map<string, number>();
 
   for (const order of rawOrders) {
-    if (hasCanceledStatus(order.status_list)) {
-      continue;
-    }
-
     const buyerRawId = getOid(order.user_id);
     const buyerKey = buyerRawId ? (buyerKeyByRaw.get(buyerRawId) ?? null) : null;
     const orderDate = getDateOnly(order.createdAt) ?? getDateOnly(order.updatedAt) ?? "1970-01-01";
     const orderId = getOid(order._id) ?? orderDate;
     const orderNumber = String(order.order_number ?? "").trim();
     const orderIsCombined = isCombinedOrder(order.combine);
+    const orderCanceled = hasCanceledStatus(order.status_list);
+    const orderHasNoCombineField = !("combine" in order);
+    const combinedMemoSale =
+      !orderIsCombined &&
+      typeof order.combine === "object" &&
+      order.combine !== null &&
+      (order.combine as RawDocument).is_combine === false &&
+      ensureArray(order.combine_products).length >= 1;
     const orderRef = normalizeRef(order.ref);
     let orderWarehouseKey: number | null = null;
 
@@ -1409,18 +1415,21 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       continue;
     }
 
+    if (orderCanceled && !combinedMemoSale) {
+      continue;
+    }
+
     if (buyerRawId && orderRef) {
       orderMemoRefIndex.add(`${buyerRawId}:${orderRef}`);
     }
 
-    // Sales are only realized once the order has shipped/delivered. Purchase facts and the
-    // memo-conversion index above are still built for every (non-canceled) order.
-    const orderFulfilled = reachedShippedOrDelivered(order.status_list);
+    const orderDelivered = hasOrderStatus(order.status_list, ["order delivered"]);
+    const backendRecognizedSale = (orderHasNoCombineField && orderDelivered && !orderCanceled) || combinedMemoSale;
 
-    if (orderFulfilled) {
+    if (backendRecognizedSale) {
       salesDocuments.push({
         documentId: `order:${orderId}`,
-        totalValue: Number(asNumber((order.cost as RawDocument | undefined)?.total).toFixed(2)),
+        totalValue: asNumber((order.cost as RawDocument | undefined)?.total),
         taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.tax).toFixed(2)),
         vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
       });
@@ -1467,7 +1476,7 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       const purchasePricePerCarat = inventoryVendorPrice || asNumber(product.vendor_price);
       const purchaseValue = Number((purchasePricePerCarat * carat * quantity).toFixed(2));
 
-      if (orderFulfilled) {
+      if (backendRecognizedSale) {
         pushRow({
           id: `order:${getOid(order._id) ?? orderDate}:${stockNumber}`,
           documentId: `order:${orderId}`,
@@ -1498,7 +1507,7 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
         });
       }
 
-      if (purchaseValue > 0) {
+      if (!orderCanceled && purchaseValue > 0) {
         pushRow({
           id: `order-purchase:${getOid(order._id) ?? orderDate}:${stockNumber}`,
           documentId: `order-purchase:${orderId}`,
@@ -1625,13 +1634,81 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
     });
   }
 
-  for (const order of rawLooseLotsOrders) {
-    if (hasCanceledStatus(order.status_list)) {
+  for (const order of rawLooseLotsMaster) {
+    if (!hasOrderStatus(order.status_list, ["order placed"]) || order.payment_method === "memo") {
       continue;
     }
 
-    // Only count loose-lot orders that have shipped/delivered.
-    if (!reachedShippedOrDelivered(order.status_list)) {
+    const buyerRawId = getOid(order.buyer_id);
+    const buyerKey = buyerRawId ? (buyerKeyByRaw.get(buyerRawId) ?? null) : null;
+    const warehouseKey = resolveWarehouseKey(order.warehouse);
+    const orderDate = getDateOnly(order.createdAt) ?? getDateOnly(order.updatedAt) ?? "1970-01-01";
+    const orderId = getOid(order._id) ?? orderDate;
+    const fulfilled = reachedShippedOrDelivered(order.status_list);
+
+    salesDocuments.push({
+      documentId: `loose-master:${orderId}`,
+      totalValue: asNumber((order.cost as RawDocument | undefined)?.total),
+      taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.gst).toFixed(2)),
+      vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
+    });
+
+    for (const entry of ensureArray(order.entries)) {
+      const carat = asNumber(entry.available_carats) || asNumber(entry.total_carat);
+      const quantity = asNumber(entry.available_pcs) || asNumber(entry.number_of_stone) || 1;
+      const orderedUnits = asNumber(entry.number_of_stone) || quantity;
+      const pricePerCarat = asNumber(entry.price_par_carat) || asNumber(entry.price_per_carat) || asNumber(entry.buyer_price_per_carat);
+      const salesValue = Number((pricePerCarat * carat).toFixed(2));
+      const shape = resolveShape(entry.shape);
+      const size = typeof entry.size === "string" && entry.size.trim().length > 0
+        ? entry.size.trim()
+        : sizeBucketLabel(carat);
+      const color = typeof entry.color === "string" && entry.color.trim().length > 0 ? entry.color.trim() : "Unknown";
+      const clarity = typeof entry.clarity === "string" && entry.clarity.trim().length > 0 ? entry.clarity.trim() : "Unknown";
+      const stockNumber = [entry.lotid, entry.item_no, entry._id]
+        .map((value) => String(value ?? "").trim())
+        .find((value) => value.length > 0) ?? stockIdentifier(entry, "LLM");
+      const productRecord = ensureProduct({
+        sku: stockNumber,
+        shape,
+        size,
+        color,
+        clarity,
+        productType: "loose_lot"
+      });
+
+      pushRow({
+        id: `loose-master:${getOid(order._id) ?? orderDate}:${stockNumber}`,
+        documentId: `loose-master:${orderId}`,
+        date: orderDate,
+        warehouseKey,
+        buyerKey,
+        vendorKey: null,
+        productKey: productRecord.key,
+        salesValue,
+        purchaseValue: 0,
+        revenueCostValue: 0,
+        memoGivenValue: 0,
+        memoConvertedValue: 0,
+        quantity,
+        productType: "loose_lot",
+        shape,
+        size,
+        color,
+        clarity,
+        stockNumber,
+        qcStatus: "Unknown",
+        status: typeof order.invoice_ind_loc === "string" && order.invoice_ind_loc.length > 0 ? "Invoiced" : "Ordered",
+        sourceType: "sales",
+        orderedUnits,
+        fulfilledUnits: fulfilled ? quantity : 0
+      });
+
+    }
+  }
+
+  for (const order of rawLooseLotsOrders) {
+    if (!hasOrderStatus(order.status_list, ["order initiated"]) || order.payment_method === "memo") {
       continue;
     }
 
@@ -1641,10 +1718,11 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
     const warehouseKey = resolveWarehouseKey(sourceOrder?.warehouse);
     const orderDate = getDateOnly(order.createdAt) ?? getDateOnly(order.updatedAt) ?? "1970-01-01";
     const orderId = getOid(order._id) ?? orderDate;
+    const fulfilled = reachedShippedOrDelivered(order.status_list);
 
     salesDocuments.push({
       documentId: `loose-order:${orderId}`,
-      totalValue: Number(asNumber((order.cost as RawDocument | undefined)?.total).toFixed(2)),
+      totalValue: asNumber((order.cost as RawDocument | undefined)?.total),
       taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.gst).toFixed(2)),
       vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
     });
@@ -1653,7 +1731,7 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
       const carat = asNumber(stock.available_carats) || asNumber(stock.total_carat);
       const quantity = asNumber(stock.available_pcs) || asNumber(stock.number_of_stone) || 1;
       const orderedUnits = asNumber(stock.number_of_stone) || quantity;
-      const fulfilledUnits = asNumber(stock.available_pcs);
+      const fulfilledUnits = fulfilled ? asNumber(stock.available_pcs) : 0;
       const salesValue = Number(((asNumber(stock.price_per_carat) || 0) * carat).toFixed(2));
       const shape = resolveShape(stock.shape);
       const size = typeof stock.size === "string" && stock.size.trim().length > 0
@@ -1702,12 +1780,11 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
   }
 
   for (const order of rawOwnShapeOrders) {
-    if (hasCanceledStatus(order.status_list)) {
-      continue;
-    }
-
-    // Only count own-shape orders that have shipped/delivered.
-    if (!reachedShippedOrDelivered(order.status_list)) {
+    if (
+      !hasOrderStatus(order.status_list, ["order initiated"]) ||
+      order.payment_method === "memo" ||
+      (order.cost as RawDocument | undefined)?.paid !== true
+    ) {
       continue;
     }
 
@@ -1720,7 +1797,7 @@ function buildLumexDataset(rawCollections: LumexRawCollections): LumexDataset {
 
     salesDocuments.push({
       documentId: `own-shape-order:${orderId}`,
-      totalValue: Number(asNumber((order.cost as RawDocument | undefined)?.total).toFixed(2)),
+      totalValue: asNumber((order.cost as RawDocument | undefined)?.total),
       taxValue: Number(asNumber((order.cost as RawDocument | undefined)?.gst).toFixed(2)),
       vatValue: Number(asNumber((order.cost as RawDocument | undefined)?.vat).toFixed(2))
     });
